@@ -4,316 +4,163 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>仓库库存管理</title>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js">
-// ===== GitHub 数据同步 =====
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
+<script>
+// ===== Supabase 数据同步（简化版）=====
+const SUPABASE_URL = 'https://luavduedmnhdpqyftdgk.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1YXZkdWVkbW5oZHBxeWZ0ZGdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMDIzNDcsImV4cCI6MjA5Nzg3ODM0N30._-qKCQk79UhvMyq6byYHon3aPBhrKKC0w480hxEzlao';
+
+// 初始化 Supabase 客户端
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// 从 Supabase 加载数据
+async function loadFromSupabase() {
+    try {
+        showToast('正在从云端加载数据...', '');
+        
+        // 从 wms_data 表读取所有数据
+        const { data, error } = await supabase
+            .from('wms_data')
+            .select('*');
+        
+        if (error) throw error;
+        
+        // 解析数据并存入 localStorage
+        if (data && data.length > 0) {
+            data.forEach(function(row) {
+                if (row.data_type === 'products') {
+                    localStorage.setItem('wms_p', JSON.stringify(row.data));
+                } else if (row.data_type === 'inventory') {
+                    localStorage.setItem('wms_i', JSON.stringify(row.data));
+                } else if (row.data_type === 'locations') {
+                    localStorage.setItem('wms_loc', JSON.stringify(row.data));
+                } else if (row.data_type === 'inbound_records') {
+                    localStorage.setItem('wms_in_recs', JSON.stringify(row.data));
+                }
+            });
+            
+            showToast('云端数据加载成功！', 'success');
+            
+            // 刷新页面显示
+            setTimeout(function() {
+                location.reload();
+            }, 1000);
+        } else {
+            showToast('云端暂无数据，将使用本地数据', '');
+        }
+    } catch (error) {
+        console.error('加载云端数据失败:', error);
+        showToast('加载云端数据失败: ' + error.message, 'error');
+    }
+}
+
+// 保存数据到 Supabase
+async function saveToSupabase(dataType, data) {
+    try {
+        // 检查是否已存在
+        const { data: existing } = await supabase
+            .from('wms_data')
+            .select('id')
+            .eq('data_type', dataType)
+            .single();
+        
+        if (existing) {
+            // 更新
+            const { error } = await supabase
+                .from('wms_data')
+                .update({ data: data, updated_at: new Date() })
+                .eq('data_type', dataType);
+            
+            if (error) throw error;
+        } else {
+            // 插入
+            const { error } = await supabase
+                .from('wms_data')
+                .insert([{ data_type: dataType, data: data }]);
+            
+            if (error) throw error;
+        }
+    } catch (error) {
+        console.error('保存数据失败:', error);
+        throw error;
+    }
+}
+
+// 同步所有数据到云端
+async function syncAllToCloud() {
+    showToast('正在同步到云端...', '');
+    
+    try {
+        // 保存商品
+        const products = JSON.parse(localStorage.getItem('wms_p') || '[]');
+        await saveToSupabase('products', products);
+        
+        // 保存库存
+        const inventory = JSON.parse(localStorage.getItem('wms_i') || '[]');
+        await saveToSupabase('inventory', inventory);
+        
+        // 保存货位
+        const locations = JSON.parse(localStorage.getItem('wms_loc') || '{}');
+        await saveToSupabase('locations', locations);
+        
+        // 保存入库记录
+        const records = JSON.parse(localStorage.getItem('wms_in_recs') || '[]');
+        await saveToSupabase('inbound_records', records);
+        
+        showToast('所有数据已同步到云端！', 'success');
+    } catch (error) {
+        showToast('同步失败: ' + error.message, 'error');
+    }
+}
+
+// 页面加载时自动同步
+document.addEventListener('DOMContentLoaded', function() {
+    // 延迟加载，确保其他组件先初始化
+    setTimeout(function() {
+        // 检查是否已经有本地数据
+        const hasLocalData = localStorage.getItem('wms_p') && 
+                            JSON.parse(localStorage.getItem('wms_p')).length > 0;
+        
+        if (!hasLocalData) {
+            // 没有本地数据，从云端加载
+            loadFromSupabase();
+        }
+    }, 2000);
+});
+
+// 点击头部触发设置
 var _hdrClicks = 0;
 var _hdrTimer = null;
 
 function onHeaderClick(){
-  _hdrClicks++;
-  clearTimeout(_hdrTimer);
-  _hdrTimer = setTimeout(function(){
-    if(_hdrClicks >= 7){ askResetPassword(); }
-    else if(_hdrClicks >= 3){ openGhModal(); }
-    _hdrClicks = 0;
-  }, 3000);
+    _hdrClicks++;
+    clearTimeout(_hdrTimer);
+    _hdrTimer = setTimeout(function(){
+        if(_hdrClicks >= 7){ askResetPassword(); }
+        else if(_hdrClicks >= 3){ 
+            document.getElementById('cloud-modal').style.display = 'flex'; 
+        }
+        _hdrClicks = 0;
+    }, 3000);
 }
 
 function askResetPassword(){
-  var pwd = prompt("\u8bf7\u8f93\u5165\u521d\u59cb\u5316\u5bc6\u7801\uff1a");
-  if(pwd !== "Zw190806"){
-    if(pwd !== null) showToast("\u5bc6\u7801\u9519\u8bef\uff0c\u64cd\u4f5c\u5df2\u53d6\u6d88", "error");
-    return;
-  }
-  if(!confirm("\u786e\u5b9a\u8981\u6e05\u9664\u6240\u6709\u6570\u636e\u5417\uff1f\n\n\u5c06\u6e05\u9664\uff1a\u5546\u54c1\u3001\u5165\u5e93\u8bb0\u5f55\u3001\u8d27\u4f4d\u76ee\u5f55\u7b49\u6240\u6709\u672c\u5730\u6570\u636e\uff01\n\n\u6b64\u64cd\u4f5c\u4e0d\u53ef\u6062\u590d\uff01")) return;
-  localStorage.removeItem("wms_p");
-  localStorage.removeItem("wms_i");
-  localStorage.removeItem("wms_l");
-  localStorage.removeItem("wms_loc");
-  localStorage.removeItem("wms_in_recs");
-  showToast("\u6570\u636e\u5df2\u6e05\u9664\uff0c\u9875\u9762\u5c06\u5237\u65b0", "success");
-  setTimeout(function(){ location.reload(); }, 1000);
+    var pwd = prompt("请输入初始化密码：");
+    if(pwd !== "Zw190806"){
+        if(pwd !== null) showToast("密码错误，操作已取消", "error");
+        return;
+    }
+    if(!confirm("确定要清除所有数据吗？\n\n将清除：商品、入库记录、货位目录等所有本地数据！\n\n此操作不可恢复！")) return;
+    localStorage.removeItem("wms_p");
+    localStorage.removeItem("wms_i");
+    localStorage.removeItem("wms_l");
+    localStorage.removeItem("wms_loc");
+    localStorage.removeItem("wms_in_recs");
+    showToast("数据已清除，页面将刷新", "success");
+    setTimeout(function(){ location.reload(); }, 1000);
 }
-
-// UTF-8 转 base64（支持中文）
-function utf8_to_b64(str){
-  var bytes = new TextEncoder().encode(str);
-  var bin = '';
-  for(var i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
-function openGhModal(){
-  loadGhConfig();
-  document.getElementById('gh-modal').style.display = 'flex';
-}
-
-function loadGhConfig(){
-  try {
-    var c = JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}');
-    if(c.owner) document.getElementById('gh-owner').value = c.owner;
-    if(c.repo) document.getElementById('gh-repo').value = c.repo;
-    if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    // token 不在界面显示
-  } catch(e){}
-}
-
-function saveGhConfig(){
-  var cfg = getGhCfg();
-  cfg.owner = document.getElementById('gh-owner').value.trim();
-  cfg.repo = document.getElementById('gh-repo').value.trim();
-  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
-  // token 不在这里修改，保持原值
-  if(!cfg.owner || !cfg.repo || !cfg.token){
-    showToast('请填写完整配置信息', 'error');
-    return;
-  }
-  localStorage.setItem('wms_gh_cfg', JSON.stringify(cfg));
-  showToast('配置已保存', 'success');
-}
-
-function getGhCfg(){
-  try { return JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}'); } catch(e){ return {}; }
-}
-
-function testGhConnection(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先保存配置', 'error'); return; }
-  showToast('正在测试连接...', '');
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.name) showToast('连接成功！仓库：' + d.name, 'success');
-    else showToast('连接失败：' + (d.message||'未知错误'), 'error');
-  }).catch(function(e){ showToast('连接失败：' + e.message, 'error'); });
-}
-
-function syncToGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  var data = {
-    products: ps(),
-    inRecords: iv(),
-    locs: locs(),
-    inList: typeof _inList!=='undefined' ? _inList : [],
-    syncTime: new Date().toISOString()
-  };
-  var content_b64 = utf8_to_b64(JSON.stringify(data, null, 2));
-  showToast('正在推送数据...', '');
-  // Get current file SHA
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json?ref='+cfg.branch, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(fileInfo){
-    var sha = fileInfo.sha || null;
-    var body = { message: 'WMS data sync: ' + new Date().toISOString(), content: content_b64, branch: cfg.branch };
-    if(sha) body.sha = sha;
-    return fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json', {
-      method: 'PUT',
-      headers: { 'Authorization': 'token '+cfg.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.content) showToast('数据推送成功！', 'success');
-    else showToast('推送失败', 'error');
-  }).catch(function(e){ showToast('推送失败：' + e.message, 'error'); });
-}
-
-function syncFromGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  showToast('正在拉取数据...', '');
-  fetch('https://raw.githubusercontent.com/'+cfg.owner+'/'+cfg.repo+'/'+cfg.branch+'/data.json?t='+Date.now())
-    .then(function(r){ return r.json(); }).then(function(d){
-      if(d.products) { savePs(d.products); }
-      if(d.inRecords) { saveIv(d.inRecords); }
-      if(d.locs) { saveLocs(d.locs); }
-      if(d.inList) { _inList = d.inList; }
-      showToast('数据拉取成功！页面将刷新', 'success');
-      setTimeout(function(){ location.reload(); }, 1000);
-    }).catch(function(e){
-      showToast('拉取失败：' + e.message, 'error');
-    });
-}
-
-
-// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
-(function(){
-  var saved = localStorage.getItem('wms_gh_cfg');
-  if(!saved){
-    // 只预填仓库信息，Token 需管理员首次配置时输入
-    localStorage.setItem('wms_gh_cfg', JSON.stringify({
-      owner: 'TombDream',
-      repo: 'wms.github.io',
-      branch: 'main',
-      token: ''
-    }));
-  }
-})();
-
-// ===== 页面加载时自动拉取（防无限循环）=====
-document.addEventListener('DOMContentLoaded', function(){
-  var cfg = getGhCfg();
-  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
-    sessionStorage.setItem('_gh_synced', '1');
-    setTimeout(function(){ syncFromGh(); }, 1500);
-  }
-});
-
-</script>
-<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js">
-// ===== GitHub 数据同步 =====
-var _hdrClicks = 0;
-var _hdrTimer = null;
-
-function onHeaderClick(){
-  _hdrClicks++;
-  clearTimeout(_hdrTimer);
-  _hdrTimer = setTimeout(function(){
-    if(_hdrClicks >= 7){ askResetPassword(); }
-    else if(_hdrClicks >= 3){ openGhModal(); }
-    _hdrClicks = 0;
-  }, 3000);
-}
-
-function askResetPassword(){
-  var pwd = prompt("\u8bf7\u8f93\u5165\u521d\u59cb\u5316\u5bc6\u7801\uff1a");
-  if(pwd !== "Zw190806"){
-    if(pwd !== null) showToast("\u5bc6\u7801\u9519\u8bef\uff0c\u64cd\u4f5c\u5df2\u53d6\u6d88", "error");
-    return;
-  }
-  if(!confirm("\u786e\u5b9a\u8981\u6e05\u9664\u6240\u6709\u6570\u636e\u5417\uff1f\n\n\u5c06\u6e05\u9664\uff1a\u5546\u54c1\u3001\u5165\u5e93\u8bb0\u5f55\u3001\u8d27\u4f4d\u76ee\u5f55\u7b49\u6240\u6709\u672c\u5730\u6570\u636e\uff01\n\n\u6b64\u64cd\u4f5c\u4e0d\u53ef\u6062\u590d\uff01")) return;
-  localStorage.removeItem("wms_p");
-  localStorage.removeItem("wms_i");
-  localStorage.removeItem("wms_l");
-  localStorage.removeItem("wms_loc");
-  localStorage.removeItem("wms_in_recs");
-  showToast("\u6570\u636e\u5df2\u6e05\u9664\uff0c\u9875\u9762\u5c06\u5237\u65b0", "success");
-  setTimeout(function(){ location.reload(); }, 1000);
-}
-
-// UTF-8 转 base64（支持中文）
-function utf8_to_b64(str){
-  var bytes = new TextEncoder().encode(str);
-  var bin = '';
-  for(var i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
-function openGhModal(){
-  loadGhConfig();
-  document.getElementById('gh-modal').style.display = 'flex';
-}
-
-function loadGhConfig(){
-  try {
-    var c = JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}');
-    if(c.owner) document.getElementById('gh-owner').value = c.owner;
-    if(c.repo) document.getElementById('gh-repo').value = c.repo;
-    if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    // token 不在界面显示
-  } catch(e){}
-}
-
-function saveGhConfig(){
-  var cfg = getGhCfg();
-  cfg.owner = document.getElementById('gh-owner').value.trim();
-  cfg.repo = document.getElementById('gh-repo').value.trim();
-  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
-  // token 不在这里修改，保持原值
-  if(!cfg.owner || !cfg.repo || !cfg.token){
-    showToast('请填写完整配置信息', 'error');
-    return;
-  }
-  localStorage.setItem('wms_gh_cfg', JSON.stringify(cfg));
-  showToast('配置已保存', 'success');
-}
-
-function getGhCfg(){
-  try { return JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}'); } catch(e){ return {}; }
-}
-
-function testGhConnection(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先保存配置', 'error'); return; }
-  showToast('正在测试连接...', '');
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.name) showToast('连接成功！仓库：' + d.name, 'success');
-    else showToast('连接失败：' + (d.message||'未知错误'), 'error');
-  }).catch(function(e){ showToast('连接失败：' + e.message, 'error'); });
-}
-
-function syncToGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  var data = {
-    products: ps(),
-    inRecords: iv(),
-    locs: locs(),
-    inList: typeof _inList!=='undefined' ? _inList : [],
-    syncTime: new Date().toISOString()
-  };
-  var content_b64 = utf8_to_b64(JSON.stringify(data, null, 2));
-  showToast('正在推送数据...', '');
-  // Get current file SHA
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json?ref='+cfg.branch, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(fileInfo){
-    var sha = fileInfo.sha || null;
-    var body = { message: 'WMS data sync: ' + new Date().toISOString(), content: content_b64, branch: cfg.branch };
-    if(sha) body.sha = sha;
-    return fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json', {
-      method: 'PUT',
-      headers: { 'Authorization': 'token '+cfg.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.content) showToast('数据推送成功！', 'success');
-    else showToast('推送失败', 'error');
-  }).catch(function(e){ showToast('推送失败：' + e.message, 'error'); });
-}
-
-function syncFromGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  showToast('正在拉取数据...', '');
-  fetch('https://raw.githubusercontent.com/'+cfg.owner+'/'+cfg.repo+'/'+cfg.branch+'/data.json?t='+Date.now())
-    .then(function(r){ return r.json(); }).then(function(d){
-      if(d.products) { savePs(d.products); }
-      if(d.inRecords) { saveIv(d.inRecords); }
-      if(d.locs) { saveLocs(d.locs); }
-      if(d.inList) { _inList = d.inList; }
-      showToast('数据拉取成功！页面将刷新', 'success');
-      setTimeout(function(){ location.reload(); }, 1000);
-    }).catch(function(e){
-      showToast('拉取失败：' + e.message, 'error');
-    });
-}
-
-
-// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
-(function(){
-  var saved = localStorage.getItem('wms_gh_cfg');
-  if(!saved){
-    // 只预填仓库信息，Token 需管理员首次配置时输入
-    localStorage.setItem('wms_gh_cfg', JSON.stringify({
-      owner: 'TombDream',
-      repo: 'wms.github.io',
-      branch: 'main',
-      token: ''
-    }));
-  }
-})();
-
-// ===== 页面加载时自动拉取（防无限循环）=====
-document.addEventListener('DOMContentLoaded', function(){
-  var cfg = getGhCfg();
-  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
-    sessionStorage.setItem('_gh_synced', '1');
-    setTimeout(function(){ syncFromGh(); }, 1500);
-  }
-});
 
 </script>
 <style>
@@ -1706,188 +1553,18 @@ function moveStockCol(idx, dir){
 // ===== 初始化 =====
 renderDash();
 showToast('页面已加载完成');
-
-// ===== GitHub 数据同步 =====
-var _hdrClicks = 0;
-var _hdrTimer = null;
-
-function onHeaderClick(){
-  _hdrClicks++;
-  clearTimeout(_hdrTimer);
-  _hdrTimer = setTimeout(function(){
-    if(_hdrClicks >= 7){ askResetPassword(); }
-    else if(_hdrClicks >= 3){ openGhModal(); }
-    _hdrClicks = 0;
-  }, 3000);
-}
-
-function askResetPassword(){
-  var pwd = prompt("\u8bf7\u8f93\u5165\u521d\u59cb\u5316\u5bc6\u7801\uff1a");
-  if(pwd !== "Zw190806"){
-    if(pwd !== null) showToast("\u5bc6\u7801\u9519\u8bef\uff0c\u64cd\u4f5c\u5df2\u53d6\u6d88", "error");
-    return;
-  }
-  if(!confirm("\u786e\u5b9a\u8981\u6e05\u9664\u6240\u6709\u6570\u636e\u5417\uff1f\n\n\u5c06\u6e05\u9664\uff1a\u5546\u54c1\u3001\u5165\u5e93\u8bb0\u5f55\u3001\u8d27\u4f4d\u76ee\u5f55\u7b49\u6240\u6709\u672c\u5730\u6570\u636e\uff01\n\n\u6b64\u64cd\u4f5c\u4e0d\u53ef\u6062\u590d\uff01")) return;
-  localStorage.removeItem("wms_p");
-  localStorage.removeItem("wms_i");
-  localStorage.removeItem("wms_l");
-  localStorage.removeItem("wms_loc");
-  localStorage.removeItem("wms_in_recs");
-  showToast("\u6570\u636e\u5df2\u6e05\u9664\uff0c\u9875\u9762\u5c06\u5237\u65b0", "success");
-  setTimeout(function(){ location.reload(); }, 1000);
-}
-
-// UTF-8 转 base64（支持中文）
-function utf8_to_b64(str){
-  var bytes = new TextEncoder().encode(str);
-  var bin = '';
-  for(var i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
-function openGhModal(){
-  loadGhConfig();
-  document.getElementById('gh-modal').style.display = 'flex';
-}
-
-function loadGhConfig(){
-  try {
-    var c = JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}');
-    if(c.owner) document.getElementById('gh-owner').value = c.owner;
-    if(c.repo) document.getElementById('gh-repo').value = c.repo;
-    if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    // token 不在界面显示
-  } catch(e){}
-}
-
-function saveGhConfig(){
-  var cfg = getGhCfg();
-  cfg.owner = document.getElementById('gh-owner').value.trim();
-  cfg.repo = document.getElementById('gh-repo').value.trim();
-  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
-  // token 不在这里修改，保持原值
-  if(!cfg.owner || !cfg.repo || !cfg.token){
-    showToast('请填写完整配置信息', 'error');
-    return;
-  }
-  localStorage.setItem('wms_gh_cfg', JSON.stringify(cfg));
-  showToast('配置已保存', 'success');
-}
-
-function getGhCfg(){
-  try { return JSON.parse(localStorage.getItem('wms_gh_cfg') || '{}'); } catch(e){ return {}; }
-}
-
-function testGhConnection(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先保存配置', 'error'); return; }
-  showToast('正在测试连接...', '');
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.name) showToast('连接成功！仓库：' + d.name, 'success');
-    else showToast('连接失败：' + (d.message||'未知错误'), 'error');
-  }).catch(function(e){ showToast('连接失败：' + e.message, 'error'); });
-}
-
-function syncToGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  var data = {
-    products: ps(),
-    inRecords: iv(),
-    locs: locs(),
-    inList: typeof _inList!=='undefined' ? _inList : [],
-    syncTime: new Date().toISOString()
-  };
-  var content_b64 = utf8_to_b64(JSON.stringify(data, null, 2));
-  showToast('正在推送数据...', '');
-  // Get current file SHA
-  fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json?ref='+cfg.branch, {
-    headers: { 'Authorization': 'token '+cfg.token }
-  }).then(function(r){ return r.json(); }).then(function(fileInfo){
-    var sha = fileInfo.sha || null;
-    var body = { message: 'WMS data sync: ' + new Date().toISOString(), content: content_b64, branch: cfg.branch };
-    if(sha) body.sha = sha;
-    return fetch('https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/data.json', {
-      method: 'PUT',
-      headers: { 'Authorization': 'token '+cfg.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if(d.content) showToast('数据推送成功！', 'success');
-    else showToast('推送失败', 'error');
-  }).catch(function(e){ showToast('推送失败：' + e.message, 'error'); });
-}
-
-function syncFromGh(){
-  var cfg = getGhCfg();
-  if(!cfg.token){ showToast('请先配置 GitHub', 'error'); return; }
-  showToast('正在拉取数据...', '');
-  fetch('https://raw.githubusercontent.com/'+cfg.owner+'/'+cfg.repo+'/'+cfg.branch+'/data.json?t='+Date.now())
-    .then(function(r){ return r.json(); }).then(function(d){
-      if(d.products) { savePs(d.products); }
-      if(d.inRecords) { saveIv(d.inRecords); }
-      if(d.locs) { saveLocs(d.locs); }
-      if(d.inList) { _inList = d.inList; }
-      showToast('数据拉取成功！页面将刷新', 'success');
-      setTimeout(function(){ location.reload(); }, 1000);
-    }).catch(function(e){
-      showToast('拉取失败：' + e.message, 'error');
-    });
-}
-
-
-// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
-(function(){
-  var saved = localStorage.getItem('wms_gh_cfg');
-  if(!saved){
-    // 只预填仓库信息，Token 需管理员首次配置时输入
-    localStorage.setItem('wms_gh_cfg', JSON.stringify({
-      owner: 'TombDream',
-      repo: 'wms.github.io',
-      branch: 'main',
-      token: ''
-    }));
-  }
-})();
-
-// ===== 页面加载时自动拉取（防无限循环）=====
-document.addEventListener('DOMContentLoaded', function(){
-  var cfg = getGhCfg();
-  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
-    sessionStorage.setItem('_gh_synced', '1');
-    setTimeout(function(){ syncFromGh(); }, 1500);
-  }
-});
-
 </script>
 <div id="toast" class="toast"></div>
 <div id="debug-err" style="display:none;position:fixed;bottom:0;left:0;width:100%;max-height:40vh;overflow-y:auto;background:#fff3cd;color:#856404;font-size:12px;padding:8px 10px;border-top:2px solid #ffe58f;z-index:9999;"></div>
-<div id="gh-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.style.display='none'">
-  <div style="background:white;border-radius:12px;padding:24px;max-width:400px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.3);">
-    <div style="font-size:17px;font-weight:bold;margin-bottom:16px;color:#1a73e8;">GitHub 同步设置</div>
-    <div style="margin-bottom:12px;">
-      <div style="font-size:12px;color:#888;margin-bottom:4px;">仓库所属用户</div>
-      <input id="gh-owner" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;" placeholder="如：TombDream">
-    </div>
-    <div style="margin-bottom:12px;">
-      <div style="font-size:12px;color:#888;margin-bottom:4px;">仓库名称</div>
-      <input id="gh-repo" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;" placeholder="如：wms.github.io">
-    </div>
-    <div style="margin-bottom:12px;">
-      <div style="font-size:12px;color:#888;margin-bottom:4px;">分支名称</div>
-      <input id="gh-branch" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;" placeholder="main" value="main">
-    </div>
 
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-primary" style="flex:1;min-width:120px;" onclick="saveGhConfig()">💾 保存配置</button>
-      <button class="btn" style="flex:1;min-width:100px;" onclick="testGhConnection()">🔗 测试连接</button>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
-      <button class="btn" style="flex:1;min-width:100px;background:#e8f0fe;color:#1a73e8;" onclick="syncToGh()">⬆️ 推送数据</button>
-      <button class="btn" style="flex:1;min-width:100px;background:#e8f0fe;color:#1a73e8;" onclick="syncFromGh()">⬇️ 拉取数据</button>
-      <button class="btn btn-danger" style="flex:1;min-width:80px;" onclick="document.getElementById('gh-modal').style.display='none'">关闭</button>
+<!-- 云端同步设置弹窗 -->
+<div id="cloud-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;justify-content:center;align-items:center;">
+  <div style="background:white;border-radius:12px;padding:20px;width:90%;max-width:400px;">
+    <h3 style="margin-bottom:16px;color:#1a73e8;">☁️ 云端数据同步</h3>
+    <div style="margin-bottom:12px;">
+      <button class="btn" style="width:100%;margin-bottom:8px;background:#4CAF50;color:white;" onclick="syncAllToCloud()">⬆️ 推送数据到云端</button>
+      <button class="btn" style="width:100%;margin-bottom:8px;background:#2196F3;color:white;" onclick="loadFromSupabase()">⬇️ 从云端拉取数据</button>
+      <button class="btn" style="width:100%;background:#f44336;color:white;" onclick="document.getElementById('cloud-modal').style.display='none'">关闭</button>
     </div>
   </div>
 </div>
