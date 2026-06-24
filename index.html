@@ -120,6 +120,15 @@ tr:active { background: #f0f4ff; }
 .toast.success { background: #4caf50; }
 .toast.error { background: #f44336; }
 
+/* ===== GitHub 设置弹窗 ===== */
+#gh-modal-ask { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1002; }
+#gh-modal-ask.show { display: flex; align-items: center; justify-content: center; }
+#gh-modal { background: white; border-radius: 14px; padding: 22px 18px; width: 92%; max-width: 420px; max-height: 85vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.25); }
+.gh-status { font-size: 13px; padding: 8px 12px; border-radius: 6px; margin-top: 10px; }
+.gh-status.ok { background: #e8f5e9; color: #2e7d32; }
+.gh-status.err { background: #fde8e8; color: #c62828; }
+.gh-status.syncing { background: #e3f2fd; color: #1565c0; }
+
 /* ===== 手机适配 (<=600px) ===== */
 @media (max-width: 600px) {
   body { font-size: 15px; }
@@ -450,23 +459,204 @@ function showToast(msg, type){
   setTimeout(function(){ el.style.display = 'none'; }, 3000);
 }
 
-// ===== 数据初始化（隐藏触发：连点顶部标题7次）=====
-var _resetClicks = 0;
-var _resetTimer = null;
+
+// UTF-8 转 base64（支持中文）
+function utf8_to_b64(str){
+  var bytes = new TextEncoder().encode(str);
+  var bin = '';
+  for(var i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// ===== 标题点击触发（3下=设置，7下=重置）=====
+var _hdrClicks = 0;
+var _hdrTimer = null;
 
 function onHeaderClick(){
-  _resetClicks++;
-  clearTimeout(_resetTimer);
-  _resetTimer = setTimeout(function(){ _resetClicks = 0; }, 3000);
-
-  if(_resetClicks >= 7){
-    _resetClicks = 0;
-    clearTimeout(_resetTimer);
-    askResetPassword();
-  }
+  _hdrClicks++;
+  clearTimeout(_hdrTimer);
+  _hdrTimer = setTimeout(function(){
+    if(_hdrClicks >= 7){ askResetPassword(); }
+    else if(_hdrClicks >= 3){ openGhModal(); }
+    _hdrClicks = 0;
+  }, 3000);
 }
 
 function askResetPassword(){
+  var pwd = prompt("请输入初始化密码：");
+  if(pwd !== "Zw190806"){
+    if(pwd !== null) showToast("密码错误，操作已取消", "error");
+    return;
+  }
+  if(!confirm("确定要清除所有数据吗？
+
+将清除：商品、入库记录、货位目录等所有本地数据！
+
+此操作不可恢复！")) return;
+  localStorage.removeItem("wms_p");
+  localStorage.removeItem("wms_i");
+  localStorage.removeItem("wms_l");
+  localStorage.removeItem("wms_loc");
+  localStorage.removeItem("wms_in_recs");
+  showToast("数据已清除，页面将刷新", "success");
+  setTimeout(function(){ location.reload(); }, 1000);
+}
+
+function openGhModal(){
+  loadGhConfig();
+  document.getElementById('gh-modal-ask').classList.add('show');
+}
+function closeGhModal(){ document.getElementById('gh-modal-ask').classList.remove('show'); }
+
+function getGhConfig(){
+  try { return JSON.parse(localStorage.getItem('wms_gh_cfg')) || {}; } catch(e) { return {}; }
+}
+function loadGhConfig(){
+  var cfg = getGhConfig();
+  if(document.getElementById('gh-owner')) document.getElementById('gh-owner').value = cfg.owner || '';
+  if(document.getElementById('gh-repo')) document.getElementById('gh-repo').value = cfg.repo || '';
+  if(document.getElementById('gh-branch')) document.getElementById('gh-branch').value = cfg.branch || 'main';
+  if(document.getElementById('gh-token')) document.getElementById('gh-token').value = cfg.token || '';
+}
+function saveGhConfig(){
+  var cfg = {
+    owner: document.getElementById('gh-owner').value.trim(),
+    repo: document.getElementById('gh-repo').value.trim(),
+    branch: document.getElementById('gh-branch').value.trim() || 'main',
+    token: document.getElementById('gh-token').value.trim()
+  };
+  if(!cfg.owner || !cfg.repo || !cfg.token){
+    showGhStatus('请填写完整信息', 'err'); return;
+  }
+  localStorage.setItem('wms_gh_cfg', JSON.stringify(cfg));
+  showGhStatus('配置已保存', 'ok');
+}
+
+function showGhStatus(msg, type){
+  var el = document.getElementById('gh-status');
+  el.style.display = 'block';
+  el.className = 'gh-status ' + (type||'');
+  el.textContent = msg;
+  if(type !== 'syncing') setTimeout(function(){ el.style.display = 'none'; }, 4000);
+}
+
+// 测试连接
+function testGhConnection(){
+  var cfg = getGhConfig();
+  if(!cfg.token){ showGhStatus('请先保存配置', 'err'); return; }
+  showGhStatus('正在测试连接...', 'syncing');
+  fetch('https://api.github.com/repos/' + cfg.owner + '/' + cfg.repo, {
+    headers: { 'Authorization': 'token ' + cfg.token }
+  }).then(function(r){
+    if(r.ok) { showGhStatus('✅ 连接成功！仓库可访问', 'ok'); }
+    else if(r.status === 404) { showGhStatus('❌ 仓库不存在，请检查名称', 'err'); }
+    else if(r.status === 401) { showGhStatus('❌ Token 无效或无权限', 'err'); }
+    else { showGhStatus('❌ 错误：' + r.status, 'err'); }
+  }).catch(function(){ showGhStatus('❌ 网络错误，请检查网络', 'err'); });
+}
+
+// 从 GitHub 拉取数据
+function syncFromGh(){
+  var cfg = getGhConfig();
+  if(!cfg.token){ showGhStatus('请先保存配置', 'err'); return; }
+  showGhStatus('正在从 GitHub 拉取数据...', 'syncing');
+
+  var url = 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/' + cfg.branch + '/data.json';
+  fetch(url).then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(data){
+    // 写入 localStorage
+    if(data.products) localStorage.setItem('wms_p', JSON.stringify(data.products));
+    if(data.locations) localStorage.setItem('wms_loc', JSON.stringify(data.locations));
+    if(data.inRecords) localStorage.setItem('wms_in_recs', JSON.stringify(data.inRecords));
+    if(data.stock) localStorage.setItem('wms_i', JSON.stringify(data.stock));
+    showGhStatus('✅ 拉取成功！正在刷新页面...', 'ok');
+    setTimeout(function(){ location.reload(); }, 1500);
+  }).catch(function(e){
+    showGhStatus('❌ 拉取失败：' + e.message, 'err');
+  });
+}
+
+// 推送数据到 GitHub
+function syncToGh(){
+  var cfg = getGhConfig();
+  if(!cfg.token){ showGhStatus('请先保存配置', 'err'); return; }
+  showGhStatus('正在推送数据到 GitHub...', 'syncing');
+
+  // 先获取当前文件 SHA
+  var apiUrl = 'https://api.github.com/repos/' + cfg.owner + '/' + cfg.repo + '/contents/data.json?ref=' + cfg.branch;
+
+  // 组装数据
+  var data = {
+    products: JSON.parse(localStorage.getItem('wms_p') || '[]'),
+    locations: JSON.parse(localStorage.getItem('wms_loc') || '[]'),
+    inRecords: JSON.parse(localStorage.getItem('wms_in_recs') || '[]'),
+    stock: JSON.parse(localStorage.getItem('wms_i') || '[]')
+  };
+  var content = utf8_to_b64(JSON.stringify(data, null, 2));
+
+  // 获取 SHA（文件已存在的话）
+  fetch(apiUrl, { headers: { 'Authorization': 'token ' + cfg.token } })
+    .then(function(r){ return r.json(); })
+    .then(function(fileInfo){
+      var body = {
+        message: 'WMS 数据更新 ' + new Date().toLocaleString('zh-CN'),
+        content: content,
+        branch: cfg.branch
+      };
+      if(fileInfo.sha) body.sha = fileInfo.sha;
+
+      return fetch(apiUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': 'token ' + cfg.token,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(result){
+      if(result.content) showGhStatus('✅ 推送成功！数据已保存到 GitHub', 'ok');
+      else if(result.message) showGhStatus('❌ ' + result.message, 'err');
+      else showGhStatus('✅ 推送成功！', 'ok');
+    })
+    .catch(function(e){
+      showGhStatus('❌ 推送失败：' + e.message, 'err');
+    });
+}
+
+// 页面加载时自动从 GitHub 拉取（如果已配置）
+function autoSyncFromGh(){
+  var cfg = getGhConfig();
+  if(!cfg.token || !cfg.owner || !cfg.repo) return;
+  var url = 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/' + cfg.branch + '/data.json?t=' + Date.now();
+  fetch(url).then(function(r){
+    if(!r.ok) return null;
+    return r.json();
+  }).then(function(data){
+    if(!data) return;
+    if(data.products) localStorage.setItem('wms_p', JSON.stringify(data.products));
+    if(data.locations) localStorage.setItem('wms_loc', JSON.stringify(data.locations));
+    if(data.inRecords) localStorage.setItem('wms_in_recs', JSON.stringify(data.inRecords));
+    if(data.stock) localStorage.setItem('wms_i', JSON.stringify(data.stock));
+    // 不刷新页面，只更新数据
+    if(typeof renderDashboard === 'function') renderDashboard();
+  }).catch(function(){});
+}
+
+// 数据变动后自动推送（防抖）
+var _syncTimer = null;
+function autoSyncToGh(){
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(function(){
+    var cfg = getGhConfig();
+    if(!cfg.token) return;
+    syncToGh();
+  }, 5000); // 5秒后自动推送
+}
+
   var pwd = prompt('请输入初始化密码：');
   if(pwd !== 'Zw190806'){
     if(pwd !== null) showToast('密码错误，操作已取消', 'error');
@@ -1396,8 +1586,63 @@ function moveStockCol(idx, dir){
 // ===== 初始化 =====
 renderDash();
 showToast('页面已加载完成');
+
+// ===== 自动初始化 GitHub 配置 =====
+(function(){
+  var saved = localStorage.getItem('wms_gh_cfg');
+  if(!saved){
+    localStorage.setItem('wms_gh_cfg', JSON.stringify({
+      owner: 'TombDream',
+      repo: 'wms.github.io',
+      branch: 'main',
+      token: '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'
+    }));
+  }
+})();
+
+// ===== 页面加载时自动从 GitHub 拉取数据 =====
+document.addEventListener('DOMContentLoaded', function(){
+  // 延迟1秒后自动拉取，让页面先渲染
+  setTimeout(function(){ autoSyncFromGh(); }, 1000);
+});
 </script>
 <div id="toast" class="toast"></div>
+
+<!-- GitHub 设置弹窗 -->
+<div id="gh-modal-ask">
+  <div id="gh-modal">
+    <div class="modal-hd">⚙️ GitHub 数据同步设置
+      <span style="font-size:20px;cursor:pointer;color:#999;" onclick="closeGhModal()">&times;</span>
+    </div>
+    <div class="tip" style="margin-bottom:14px;">配置后，数据将保存在 GitHub 仓库，所有用户共享同一份数据。</div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>仓库所属用户/组织</label>
+      <input type="text" id="gh-owner" placeholder="如：yourname">
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>仓库名称</label>
+      <input type="text" id="gh-repo" placeholder="如：wms-stock">
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>分支名称</label>
+      <input type="text" id="gh-branch" placeholder="如：main" value="main">
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>GitHub Token（需要有 repo 权限）</label>
+      <input type="password" id="gh-token" placeholder="ghp_xxxxxxxxxxxx">
+      <div class="tip" style="margin-top:4px;">在 GitHub → Settings → Developer settings → Personal access tokens 生成</div>
+    </div>
+    <div id="gh-status" class="gh-status" style="display:none;"></div>
+    <div class="modal-ft" style="margin-top:16px;display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="saveGhConfig()" style="flex:1;">💾 保存配置</button>
+      <button class="btn" style="background:#eee;" onclick="testGhConnection()">🔗 测试连接</button>
+    </div>
+    <div class="modal-ft" style="margin-top:10px;display:flex;gap:10px;">
+      <button class="btn btn-success" onclick="syncFromGh()" style="flex:1;">⬇️ 从 GitHub 拉取数据</button>
+      <button class="btn btn-warning" onclick="syncToGh()" style="flex:1;">⬆️ 推送数据到 GitHub</button>
+    </div>
+  </div>
+</div>
 <div id="debug-err" style="display:none;position:fixed;bottom:0;left:0;width:100%;max-height:40vh;overflow-y:auto;background:#fff3cd;color:#856404;font-size:12px;padding:8px 10px;border-top:2px solid #ffe58f;z-index:9999;"></div>
 </body>
 </html>
