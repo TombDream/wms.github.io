@@ -54,17 +54,16 @@ function loadGhConfig(){
     if(c.owner) document.getElementById('gh-owner').value = c.owner;
     if(c.repo) document.getElementById('gh-repo').value = c.repo;
     if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    if(c.token) document.getElementById('gh-token').value = c.token;
+    // token 不在界面显示
   } catch(e){}
 }
 
 function saveGhConfig(){
-  var cfg = {
-    owner: document.getElementById('gh-owner').value.trim(),
-    repo: document.getElementById('gh-repo').value.trim(),
-    branch: document.getElementById('gh-branch').value.trim() || 'main',
-    token: document.getElementById('gh-token').value.trim()
-  };
+  var cfg = getGhCfg();
+  cfg.owner = document.getElementById('gh-owner').value.trim();
+  cfg.repo = document.getElementById('gh-repo').value.trim();
+  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
+  // token 不在这里修改，保持原值
   if(!cfg.owner || !cfg.repo || !cfg.token){
     showToast('请填写完整配置信息', 'error');
     return;
@@ -136,10 +135,26 @@ function syncFromGh(){
     });
 }
 
-// ===== 页面加载时自动拉取 =====
+
+// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
+(function(){
+  var saved = localStorage.getItem('wms_gh_cfg');
+  if(!saved){
+    // 只预填仓库信息，Token 需管理员首次配置时输入
+    localStorage.setItem('wms_gh_cfg', JSON.stringify({
+      owner: 'TombDream',
+      repo: 'wms.github.io',
+      branch: 'main',
+      token: ''
+    }));
+  }
+})();
+
+// ===== 页面加载时自动拉取（防无限循环）=====
 document.addEventListener('DOMContentLoaded', function(){
   var cfg = getGhCfg();
-  if(cfg.token){
+  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
+    sessionStorage.setItem('_gh_synced', '1');
     setTimeout(function(){ syncFromGh(); }, 1500);
   }
 });
@@ -195,17 +210,16 @@ function loadGhConfig(){
     if(c.owner) document.getElementById('gh-owner').value = c.owner;
     if(c.repo) document.getElementById('gh-repo').value = c.repo;
     if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    if(c.token) document.getElementById('gh-token').value = c.token;
+    // token 不在界面显示
   } catch(e){}
 }
 
 function saveGhConfig(){
-  var cfg = {
-    owner: document.getElementById('gh-owner').value.trim(),
-    repo: document.getElementById('gh-repo').value.trim(),
-    branch: document.getElementById('gh-branch').value.trim() || 'main',
-    token: document.getElementById('gh-token').value.trim()
-  };
+  var cfg = getGhCfg();
+  cfg.owner = document.getElementById('gh-owner').value.trim();
+  cfg.repo = document.getElementById('gh-repo').value.trim();
+  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
+  // token 不在这里修改，保持原值
   if(!cfg.owner || !cfg.repo || !cfg.token){
     showToast('请填写完整配置信息', 'error');
     return;
@@ -277,10 +291,26 @@ function syncFromGh(){
     });
 }
 
-// ===== 页面加载时自动拉取 =====
+
+// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
+(function(){
+  var saved = localStorage.getItem('wms_gh_cfg');
+  if(!saved){
+    // 只预填仓库信息，Token 需管理员首次配置时输入
+    localStorage.setItem('wms_gh_cfg', JSON.stringify({
+      owner: 'TombDream',
+      repo: 'wms.github.io',
+      branch: 'main',
+      token: ''
+    }));
+  }
+})();
+
+// ===== 页面加载时自动拉取（防无限循环）=====
 document.addEventListener('DOMContentLoaded', function(){
   var cfg = getGhCfg();
-  if(cfg.token){
+  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
+    sessionStorage.setItem('_gh_synced', '1');
     setTimeout(function(){ syncFromGh(); }, 1500);
   }
 });
@@ -1726,17 +1756,16 @@ function loadGhConfig(){
     if(c.owner) document.getElementById('gh-owner').value = c.owner;
     if(c.repo) document.getElementById('gh-repo').value = c.repo;
     if(c.branch) document.getElementById('gh-branch').value = c.branch;
-    if(c.token) document.getElementById('gh-token').value = c.token;
+    // token 不在界面显示
   } catch(e){}
 }
 
 function saveGhConfig(){
-  var cfg = {
-    owner: document.getElementById('gh-owner').value.trim(),
-    repo: document.getElementById('gh-repo').value.trim(),
-    branch: document.getElementById('gh-branch').value.trim() || 'main',
-    token: document.getElementById('gh-token').value.trim()
-  };
+  var cfg = getGhCfg();
+  cfg.owner = document.getElementById('gh-owner').value.trim();
+  cfg.repo = document.getElementById('gh-repo').value.trim();
+  cfg.branch = document.getElementById('gh-branch').value.trim() || 'main';
+  // token 不在这里修改，保持原值
   if(!cfg.owner || !cfg.repo || !cfg.token){
     showToast('请填写完整配置信息', 'error');
     return;
@@ -1808,10 +1837,26 @@ function syncFromGh(){
     });
 }
 
-// ===== 页面加载时自动拉取 =====
+
+// ===== 自动初始化 GitHub 配置（仅基本信息，不含Token）=====
+(function(){
+  var saved = localStorage.getItem('wms_gh_cfg');
+  if(!saved){
+    // 只预填仓库信息，Token 需管理员首次配置时输入
+    localStorage.setItem('wms_gh_cfg', JSON.stringify({
+      owner: 'TombDream',
+      repo: 'wms.github.io',
+      branch: 'main',
+      token: ''
+    }));
+  }
+})();
+
+// ===== 页面加载时自动拉取（防无限循环）=====
 document.addEventListener('DOMContentLoaded', function(){
   var cfg = getGhCfg();
-  if(cfg.token){
+  if(cfg.token && !sessionStorage.getItem('_gh_synced')){
+    sessionStorage.setItem('_gh_synced', '1');
     setTimeout(function(){ syncFromGh(); }, 1500);
   }
 });
@@ -1834,10 +1879,7 @@ document.addEventListener('DOMContentLoaded', function(){
       <div style="font-size:12px;color:#888;margin-bottom:4px;">分支名称</div>
       <input id="gh-branch" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;" placeholder="main" value="main">
     </div>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:#888;margin-bottom:4px;">GitHub Token</div>
-      <input id="gh-token" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;" placeholder="ghp_xxx 或 github_pat_xxx" type="password">
-    </div>
+
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-primary" style="flex:1;min-width:120px;" onclick="saveGhConfig()">💾 保存配置</button>
       <button class="btn" style="flex:1;min-width:100px;" onclick="testGhConnection()">🔗 测试连接</button>
