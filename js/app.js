@@ -1,0 +1,943 @@
+
+// ===== 全局 =====
+// 页面错误捕获（手机端调试用）
+window.onerror = function(msg, url, line, col, err){
+  var d = document.getElementById('toast');
+  if(d){
+    d.className = 'toast error';
+    d.textContent = 'JS错误：' + msg + '（行' + line + '）';
+    d.style.display = 'block';
+  }
+  var el = document.getElementById('debug-err');
+  if(el){ el.style.display='block'; el.innerHTML += '<div style="font-size:12px;padding:4px 0;border-bottom:1px solid #ddd;">'+msg+'（行'+line+'）</div>'; }
+  return true;
+};
+let scanTargetId = null;
+
+// ===== 提示消息 =====
+function showToast(msg, type){
+  type = type || 'success';
+  var el = document.getElementById('toast');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'toast ' + type;
+  el.style.display = 'block';
+  setTimeout(function(){ el.style.display = 'none'; }, 3000);
+}
+
+
+
+// ===== 数据 =====
+const KP='wms_p', KI='wms_i', KL='wms_l', KL2='wms_loc', KIR='wms_in_recs';
+var _inList = [];
+function get(k){try{var d=JSON.parse(localStorage.getItem(k));return Array.isArray(d)?d:[]}catch(e){return[]}}
+function set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+function ps(){return get(KP)}
+function iv(){return get(KI)}
+function locs(){return get(KL2)}
+function savePs(d){set(KP,d)}
+function saveIv(d){set(KI,d)}
+function saveLocs(d){set(KL2,d)}
+
+function isValidLoc(loc){
+  return locs().some(function(x){ return x.code === loc; });
+}
+
+function getLocName(loc){
+  var f = locs().find(function(x){ return x.code === loc; });
+  return f ? f.name : "";
+}
+
+
+
+
+function addLog(type,sku,loc,qty){
+  var l=get(KL);
+  if(!Array.isArray(l)) l=[];
+  l.unshift({t:type,s:sku,l:loc,q:qty,time:new Date().toLocaleString('zh-CN')});
+  if(l.length>200)l.length=200;
+  try{localStorage.setItem(KL,JSON.stringify(l));}catch(e){}
+}
+
+// ===== 页面切换 =====
+function go(page){
+  document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+  document.querySelectorAll('.nav-btn').forEach(function(b){ b.classList.remove('active'); });
+  var target = document.getElementById('page-'+page);
+  if(target) target.classList.add('active');
+  if(event && event.currentTarget) event.currentTarget.classList.add('active');
+  if(page==='dashboard') renderDash();
+  if(page==='products') renderProductTable();
+  if(page==='locations') renderLocationTable();
+  if(page==='stock') renderStock();
+  if(page==='in-records') renderInRecords();
+  if(page==='query') setTimeout(function(){ doQuery(); }, 100);
+}
+
+// ===== 入库清单相关 =====
+function onInSkuBlur(){
+  var sku = document.getElementById('in-sku').value.trim();
+  if(!sku) { document.getElementById('in-name').value = ''; return; }
+  var p = ps().find(function(x){ return x.sku === sku; });
+  if(p) document.getElementById('in-name').value = p.name||'';
+}
+
+function addInList(){
+  var sku = document.getElementById('in-sku').value.trim();
+  var qty = parseInt(document.getElementById('in-qty').value)||0;
+  if(!sku){ showToast('请输入商品条码','error'); return; }
+  if(qty<=0){ showToast('数量必须大于0','error'); return; }
+  var p = ps().find(function(x){ return x.sku===sku; });
+  _inList.push({sku:sku, name:p?p.name:'', qty:qty});
+  document.getElementById('in-sku').value = '';
+  document.getElementById('in-name').value = '';
+  document.getElementById('in-qty').value = '1';
+  document.getElementById('in-sku').focus();
+  renderInList();
+  showToast('✅ 已加入清单共 '+_inList.length+' 件');
+}
+
+function renderInList(){
+  var wrap = document.getElementById('in-list-wrap');
+  var empty = document.getElementById('in-list-empty');
+  if(_inList.length===0){
+    wrap.style.display = 'none';
+    empty.style.display = 'block';
+    document.getElementById('in-list-count').textContent = '';
+    return;
+  }
+  wrap.style.display = 'block';
+  empty.style.display = 'none';
+  var html = '';
+  _inList.forEach(function(item, i){
+    html += '<tr>'
+      + '<td>'+escH(item.sku)+'</td>'
+      + '<td>'+escH(item.name)+'</td>'
+      + '<td>'+item.qty+'</td>'
+      + '<td><button class="btn btn-danger btn-sm" onclick="delInListItem('+i+')">删除</button></td>'
+      + '</tr>';
+  });
+  document.getElementById('in-list-tbody').innerHTML = html;
+  document.getElementById('in-list-count').textContent = '共 '+_inList.length+' 种商品总计 '+_inList.reduce(function(s,x){return s+x.qty;},0)+' 件';
+}
+
+function delInListItem(i){
+  _inList.splice(i,1);
+  renderInList();
+}
+
+function clearInList(){
+  _inList = [];
+  document.getElementById('in-loc').value = '';
+  renderInList();
+}
+
+function genDocNo(){
+  var now = new Date();
+  var y = now.getFullYear();
+  var m = ('0'+(now.getMonth()+1)).slice(-2);
+  var d = ('0'+now.getDate()).slice(-2);
+  var h = ('0'+now.getHours()).slice(-2);
+  var min = ('0'+now.getMinutes()).slice(-2);
+  return 'RK'+y+m+d+h+min;
+}
+
+function genDocNoFromDate(dt){
+  var y = dt.getFullYear();
+  var m = ('0'+(dt.getMonth()+1)).slice(-2);
+  var d = ('0'+dt.getDate()).slice(-2);
+  var h = ('0'+dt.getHours()).slice(-2);
+  var min = ('0'+dt.getMinutes()).slice(-2);
+  return 'RK'+y+m+d+h+min;
+}
+
+function doInBatch(){
+  try {
+  if(_inList.length===0){ showToast('清单为空','error'); return; }
+  var loc = document.getElementById('in-loc').value.trim();
+  if(!loc){ showToast("请填写入库库位","error"); return; }
+  if(!isValidLoc(loc)){ showToast("库位【"+loc+"】不存在请在\"货位目录\"中添加","error"); return; }
+  if(!isValidLoc(loc)){ showToast('库位【'+loc+'】不存在请在"货位目录"中添加','error'); return; }
+  // 生成不重复的单据号
+  var now = new Date();
+  var docNo = genDocNoFromDate(now);
+  var records = getInRecords();
+  while(records.find(function(r){ return r.docNo===docNo; })){
+    now.setMinutes(now.getMinutes()+1);
+    docNo = genDocNoFromDate(now);
+  }
+  var ivList = iv();
+  _inList.forEach(function(item){
+    var exist = ivList.find(function(x){ return x.sku===item.sku && x.location===loc; });
+    if(exist){ exist.qty += item.qty; }
+    else { ivList.push({sku:item.sku, location:loc, qty:item.qty}); }
+  });
+  saveIv(ivList);
+  // 保存入库记录加上库位信息
+  var itemsWithLoc = _inList.map(function(item){ return {sku:item.sku, name:item.name, qty:item.qty, loc:loc}; });
+  var record = {docNo:docNo, date:new Date().toLocaleString('zh-CN'), loc:loc, items:itemsWithLoc};
+  records.unshift(record);
+  set(KIR, records);
+  // 添加操作日志
+  addLog('入库', docNo, loc, _inList.reduce(function(s,x){return s+x.qty;},0));
+  _inList = [];
+  document.getElementById('in-loc').value = '';
+  renderInList();
+  renderDash();
+  showToast('✅ 入库成功单据号'+docNo);
+  } catch(e) {
+    alert('入库出错' + e.message);
+  }
+}
+
+function getInRecords(){
+  try { var d = localStorage.getItem(KIR); var r = d?JSON.parse(d):[]; return Array.isArray(r)?r:[]; } catch(e){ return []; }
+}
+
+// ===== 入库管理页面 =====
+function renderInRecords(){
+  var records = getInRecords();
+  var container = document.getElementById('in-records-list');
+  if(records.length===0){
+    container.innerHTML = '<div class="empty">暂无入库记录</div>';
+    return;
+  }
+  var html = '';
+  records.forEach(function(r, idx){
+    var itemCount = (r.items||[]).length;
+    var totalQty = (r.items||[]).reduce(function(s,x){ return s+(x.qty||0); }, 0);
+    var locHtml = r.loc ? '<span class="tag tag-blue">'+escH(r.loc)+'</span>' : '<span style="color:#bbb;">—</span>';
+    html += '<div style="background:white;border-radius:10px;padding:14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+      + '<div>'
+      + '<b style="color:#1a73e8;font-size:15px;cursor:pointer;" onclick="toggleInDetail('+idx+')">'+escH(r.docNo)+'</b>'
+      + '<div style="font-size:12px;color:#999;margin-top:2px;">'+escH(r.date)+'</div>'
+      + '</div>'
+      + '<button class="btn btn-sm" style="background:#e8f0fe;color:#1a73e8;border:none;font-size:13px;" onclick="toggleInDetail('+idx+')">查看明细 ▾</button>'
+      + '</div>'
+      + '<div style="display:flex;gap:16px;font-size:13px;color:#555;">'
+      + '<div><span style="color:#888;">库位：</span>'+locHtml+'</div>'
+      + '<div><span style="color:#888;">商品：</span>'+itemCount+' 种</div>'
+      + '<div><span style="color:#888;">数量：</span><b style="color:#2e7d32;">'+totalQty+' 件</b></div>'
+      + '</div>'
+      + '<div id="in-detail-'+idx+'" style="display:none;background:#f8f9fa;border-radius:8px;padding:12px;margin-top:10px;">'
+      + '<div style="font-size:13px;color:#666;margin-bottom:8px;">单据明细 — 所有商品入库到 '+locHtml+'</div>'
+      + '<table style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;padding:6px 4px;">条码</th><th style="text-align:left;padding:6px 4px;">名称</th><th style="text-align:right;padding:6px 4px;">数量</th></tr></thead><tbody>'
+      + (r.items||[]).map(function(item){
+          return '<tr><td style="padding:5px 4px;color:#1a73e8;">'+escH(item.sku)+'</td>'
+            + '<td style="padding:5px 4px;">'+escH(item.name)+'</td>'
+            + '<td style="padding:5px 4px;text-align:right;font-weight:bold;">'+(item.qty||0)+'</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div></div>';
+  });
+  container.innerHTML = html;
+}
+
+function toggleInDetail(idx){
+  var el = document.getElementById('in-detail-'+idx);
+  if(!el) return;
+  if(el.style.display==='none') el.style.display='block';
+  else el.style.display='none';
+}
+
+// ===== 首页 =====
+function renderDash(){
+  var d=iv();
+  var skuSet = new Set(d.map(function(i){ return i.sku; }));
+  var locSet = new Set(d.map(function(i){ return i.location; }));
+  var totalQty = d.reduce(function(s,i){ return s + (i.qty||0); }, 0);
+  document.getElementById('s-skus').textContent = skuSet.size;
+  document.getElementById('s-qty').textContent = totalQty;
+  document.getElementById('s-locs').textContent = locSet.size;
+  var l=get(KL);
+  if(l.length===0){
+    document.getElementById('recent-logs').innerHTML = '<div class="empty">暂无记录</div>';
+    return;
+  }
+  var html = '<div class="table-scroll"><table><tr><th>时间</th><th>操作</th><th>条码</th><th>库位</th><th>数量</th></tr>';
+  l.slice(0,30).forEach(function(x){
+    html += '<tr><td>'+x.time+'</td><td>'+x.t+'</td><td>'+x.s+'</td><td>'+x.l+'</td><td>'+x.q+'</td></tr>';
+  });
+  html += '</table></div>';
+  document.getElementById('recent-logs').innerHTML = html;
+}
+
+// ===== 扫码Quagga2安卓+iOS通用=====
+function startScan(targetId){
+  scanTargetId = targetId;
+  document.getElementById('scan-result').textContent = '';
+  document.getElementById('scan-modal').classList.add('show');
+
+  Quagga.onDetected(function(result) {
+    var code = result.codeResult.code;
+    if(!code) return;
+    Quagga.offDetected();
+    stopScan();
+    var el = document.getElementById(scanTargetId);
+    if(el){ el.value = code; }
+    if(scanTargetId==='out-search') onOutSearch();
+    if(scanTargetId==='q-key') doQuery();
+    if(scanTargetId==='prod-search') searchProduct();
+    if(scanTargetId==='stock-search') searchStock();
+    if(scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
+    if(scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+  });
+
+  Quagga.init({
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: document.getElementById('scan-interactive'),
+      constraints: {
+        facingMode: 'environment',
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    },
+    decoder: {
+      readers: [
+        'ean_reader',
+        'upc_reader',
+        'upc_e_reader',
+        'code_128_reader',
+        'code_39_reader',
+        'itf_reader',
+        'codabar_reader'
+      ],
+      multiple: false
+    },
+    locate: true,
+    numOfWorkers: 0
+  }, function(err) {
+    if(err) {
+      Quagga.init({
+        inputStream: {
+          name: 'Live',
+          type: 'LiveStream',
+          target: document.getElementById('scan-interactive')
+        },
+        decoder: {
+          readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader'],
+          multiple: false
+        },
+        locate: true,
+        numOfWorkers: 0
+      }, function(err2) {
+        if(err2) {
+          showToast('无法打开摄像头请允许相机权限', 'error');
+          stopScan();
+          return;
+        }
+        Quagga.start();
+      });
+      return;
+    }
+    Quagga.start();
+  });
+}
+
+function stopScan(){
+  document.getElementById('scan-modal').classList.remove('show');
+  try {
+    Quagga.stop();
+    document.getElementById('scan-interactive').innerHTML = '';
+  } catch(e) {}
+}
+
+// ===== 入库 =====
+function onBarcodeInput(){
+  var sku = document.getElementById('in-barcode').value.trim();
+  if(!sku){ document.getElementById('in-name').value=''; return; }
+  var p = ps().find(function(p){ return p.sku===sku; });
+  document.getElementById('in-name').value = p ? p.name : '';
+}
+
+function doIn(){
+  var sku = document.getElementById('in-barcode').value.trim();
+  var name = document.getElementById('in-name').value.trim();
+  var loc = document.getElementById('in-loc').value.trim();
+  var qty = parseInt(document.getElementById('in-qty').value)||0;
+  if(!sku||!loc||qty<=0){ showToast('请填写完整条码、库位、数量', 'error'); return; }
+  var list = ps();
+  var p = list.find(function(p){ return p.sku===sku; });
+  if(p){ if(name) p.name=name; } else { list.push({sku:sku,name:name||''}); }
+  savePs(list);
+  var d = iv();
+  var item = d.find(function(i){ return i.sku===sku&&i.location===loc; });
+  if(item){ item.qty += qty; } else { d.push({sku:sku,location:loc,qty:qty}); }
+  saveIv(d);
+  addLog('入库',sku,loc,qty);
+  document.getElementById('in-barcode').value='';
+  document.getElementById('in-name').value='';
+  document.getElementById('in-qty').value='1';
+  document.getElementById('in-barcode').focus();
+  showToast('✅ 入库成功可继续扫码');
+}
+
+// ===== 出库 =====
+function onOutSearch(){
+  var key = document.getElementById('out-search').value.trim().toLowerCase();
+  if(!key){ document.getElementById('out-result').innerHTML=''; return; }
+  var d = iv().filter(function(i){ return i.qty>0; });
+  var list = d.filter(function(i){
+    return i.sku.toLowerCase()===key || i.sku.toLowerCase().indexOf(key)!==-1 || i.location.toLowerCase()===key || i.location.toLowerCase().indexOf(key)!==-1;
+  });
+  if(list.length===0){
+    var pm = ps().filter(function(p){ return p.name&&p.name.toLowerCase().indexOf(key)!==-1; });
+    if(pm.length>0) list = d.filter(function(i){ return pm.map(function(p){return p.sku;}).indexOf(i.sku)!==-1; });
+  }
+  if(list.length===0){ document.getElementById('out-result').innerHTML='<div class="empty">未找到匹配库存</div>'; return; }
+  var map = {};
+  list.forEach(function(i){
+    var k = i.sku+'-'+i.location;
+    if(!map[k]) map[k]={sku:i.sku,loc:i.location,qty:i.qty};
+  });
+  var html = '<div class="table-scroll"><table><tr><th>条码</th><th>名称</th><th>库位</th><th>库存</th><th>操作</th></tr>';
+  Object.keys(map).forEach(function(k){
+    var item = map[k];
+    var p = ps().find(function(p){ return p.sku===item.sku; });
+    html += '<tr>'
+      + '<td>'+item.sku+'</td>'
+      + '<td>'+(p?p.name:'')+'</td>'
+      + '<td><span class="tag">'+item.loc+'</span></td>'
+      + '<td>'+item.qty+'</td>'
+      + '<td><button class="btn btn-sm btn-primary" onclick="openOutModal(\''+item.sku.replace(/'/g,'\\\'')+'\',\''+item.loc.replace(/'/g,'\\\'')+'\','+item.qty+')">出库</button></td>'
+      + '</tr>';
+  });
+  html += '</table></div>';
+  document.getElementById('out-result').innerHTML = html;
+}
+
+function openOutModal(sku,loc,maxQty){
+  var p = ps().find(function(p){ return p.sku===sku; });
+  document.getElementById('out-m-name').value = p?p.name:'';
+  document.getElementById('out-m-sku').value = sku;
+  document.getElementById('out-m-loc').value = loc;
+  document.getElementById('out-m-max').value = maxQty;
+  document.getElementById('out-m-qty').value = '';
+  document.getElementById('out-modal-ask').classList.add('show');
+}
+
+function closeOutModal(){
+  document.getElementById('out-modal-ask').classList.remove('show');
+}
+
+function doOut(){
+  var sku = document.getElementById('out-m-sku').value;
+  var loc = document.getElementById("out-m-loc").value;
+  if(!isValidLoc(loc)){ showToast("库位【"+loc+"】不存在请在\"货位目录\"中添加","error"); return; }
+  var qty = parseInt(document.getElementById('out-m-qty').value)||0;
+  var max = parseInt(document.getElementById('out-m-max').value);
+  if(!isValidLoc(loc)){ showToast('库位【'+loc+'】不存在请在"货位目录"中添加','error'); return; }
+  if(qty<=0||qty>max){ showToast('数量无效', 'error'); return; }
+  var d = iv();
+  var item = d.find(function(i){ return i.sku===sku&&i.location===loc; });
+  if(!item) return;
+  item.qty -= qty;
+  if(item.qty<=0) d = d.filter(function(i){ return !(i.sku===sku&&i.location===loc); });
+  saveIv(d);
+  addLog('出库',sku,loc,qty);
+  closeOutModal();
+  showToast('✅ 出库成功');
+  document.getElementById('out-search').value='';
+  document.getElementById('out-result').innerHTML='';
+}
+
+// ===== 查货 =====
+function doQuery(){
+  var key = document.getElementById('q-key').value.trim().toLowerCase();
+  if(!key){ document.getElementById('q-result').innerHTML=''; return; }
+  var list = iv();
+  if(key){
+    list = list.filter(function(i){
+      var p = ps().find(function(p){ return p.sku===i.sku; });
+      return i.sku.toLowerCase().indexOf(key)!==-1 || i.location.toLowerCase().indexOf(key)!==-1 || (p&&p.name&&p.name.toLowerCase().indexOf(key)!==-1) || (p&&p.loc&&p.loc.toLowerCase().indexOf(key)!==-1);
+    });
+  }
+  if(list.length===0){
+    var pm = ps().filter(function(p){
+      return p.sku.toLowerCase().indexOf(key)!==-1 || (p.name&&p.name.toLowerCase().indexOf(key)!==-1) || (p.loc&&p.loc.toLowerCase().indexOf(key)!==-1);
+    });
+    if(pm.length>0){
+      var html = '<div style="margin-bottom:10px;color:#e65100;font-size:14px;">⚠️ 以下商品暂无库存原始库位如下</div>';
+      html += '<div class="table-scroll"><table><tr><th>条码</th><th>名称</th><th>原始库位</th><th>状态</th></tr>';
+      pm.forEach(function(p){
+        var locHtml = (p.loc)
+          ? '<span class="tag" style="background:#ff9800;">'+p.loc+'</span>'
+          : '<span style="color:#999;">未设置</span>';
+        html += '<tr><td><b>'+p.sku+'</b></td><td>'+(p.name||'')+'</td><td>'+locHtml+'</td><td><span style="color:#e65100;">暂无库存</span></td></tr>';
+      });
+      html += '</table></div>';
+      document.getElementById('q-result').innerHTML = html;
+      return;
+    }
+    document.getElementById('q-result').innerHTML = '<div class="empty">未找到匹配的商品或库存</div>';
+    return;
+  }
+  var html = '<div class="table-scroll"><table><tr><th>条码</th><th>名称</th><th>原始库位</th><th>当前库位</th><th>数量</th></tr>';
+  list.forEach(function(item){
+    var p = ps().find(function(p){ return p.sku===item.sku; });
+    var locHtml = (p&&p.loc)
+      ? '<span class="tag" style="background:#ff9800;">'+p.loc+'</span>'
+      : '<span style="color:#999;">未设置</span>';
+    html += '<tr>'
+      + '<td><b>'+item.sku+'</b></td>'
+      + '<td>'+(p?p.name:'')+'</td>'
+      + '<td>'+locHtml+'</td>'
+      + '<td><span class="tag">'+item.location+'</span></td>'
+      + '<td>'+item.qty+'</td>'
+      + '</tr>';
+  });
+  html += '</table></div>';
+  document.getElementById('q-result').innerHTML = html;
+}
+
+// ===== 商品管理 =====
+function renderProductTable(){
+  var list = ps();
+  if(_prodSortKey){
+    list.sort(function(a,b){
+      var va = String(a[_prodSortKey]||'').toLowerCase();
+      var vb = String(b[_prodSortKey]||'').toLowerCase();
+      // 空值始终排到最后
+      var ea = !va, eb = !vb;
+      if(ea && eb) return 0;
+      if(ea) return 1;
+      if(eb) return -1;
+      if(va < vb) return _prodSortDir==='asc'?-1:1;
+      if(va > vb) return _prodSortDir==='asc'?1:-1;
+      return 0;
+    });
+  }
+  var tb = document.getElementById('product-tbody');
+
+  if(!list.length){ tb.innerHTML='<tr><td colspan="5" class="empty">暂无商品，点"新增行"或"导入Excel"添加</td></tr>'; updateProdSortInd(); return; }
+
+  // 固定表头：# 条码 名称 原始库位 操作
+  var thRow = document.getElementById('product-thead-row');
+  if(thRow) {
+    thRow.innerHTML = '<th style="width:40px;">#</th><th>条码</th><th>名称</th><th>原始库位</th><th style="width:50px;">操作</th>';
+  }
+
+  // 只读展示
+  var html = '';
+  list.forEach(function(p,i){
+    var locHtml = (p.loc)
+      ? '<span class="tag tag-orange">'+escH(p.loc)+'</span>'
+      : '<span style="color:#999;">未设置</span>';
+
+    html += '<tr id="prod-row-'+i+'">'
+      + '<td>'+(i+1)+'</td>'
+      + '<td id="prod-sku-'+i+'" style="cursor:pointer;" onclick="editProdField('+i+',\'sku\')"><b>'+escH(p.sku)+'</b></td>'
+      + '<td id="prod-name-'+i+'" style="cursor:pointer;" onclick="editProdField('+i+',\'name\')">'+escH(p.name||'')+'</td>'
+      + '<td id="prod-loc-'+i+'" style="cursor:pointer;" onclick="editProdField('+i+',\'loc\')">'+locHtml+'</td>'
+      + '<td><button class="btn btn-danger btn-sm" onclick="delP('+i+')">删</button></td>'
+      + '</tr>';
+  });
+  tb.innerHTML = html;
+  updateProdSortInd();
+}
+
+function editProdField(idx, field){
+  var list = ps();
+  if(idx>=list.length) return;
+  var p = list[idx];
+  var tdId = 'prod-'+field+'-'+idx;
+  var td = document.getElementById(tdId);
+  if(!td) return;
+  var curVal = p[field]||'';
+  td.innerHTML = '<input id="prod-input-'+idx+'-'+field+'" type="text" value="'+escH(curVal)+'" style="width:100%;padding:4px 6px;border:1px solid #1a73e8;border-radius:4px;font-size:13px;" onblur="saveProdField('+idx+',\''+field+'\')" onkeydown="if(event.key==\'Enter\')saveProdField('+idx+',\''+field+'\')">';
+  var inp = document.getElementById('prod-input-'+idx+'-'+field);
+  if(inp){ inp.focus(); inp.select(); }
+}
+
+function saveProdField(idx, field){
+  var inp = document.getElementById('prod-input-'+idx+'-'+field);
+  if(!inp) { renderProductTable(); return; }
+  var list = ps();
+  if(idx>=list.length) { renderProductTable(); return; }
+  var newVal = inp.value.trim();
+  if(field==='sku' && !newVal) { showToast('条码不能为空','error'); renderProductTable(); return; }
+  if(field==='sku'){
+    var dup = list.findIndex(function(p,i){ return i!==idx && p.sku===newVal; });
+    if(dup!==-1) { showToast('条码已存在','error'); renderProductTable(); return; }
+  }
+  list[idx][field] = newVal;
+  set(list);
+  renderProductTable();
+  showToast('已更新');
+}
+
+
+
+function moveProdCol(idx, dir){
+  var newIdx = idx + dir;
+  if(newIdx<0 || newIdx>=_prodColOrder.length) return;
+  var tmp = _prodColOrder[idx];
+  _prodColOrder[idx] = _prodColOrder[newIdx];
+  _prodColOrder[newIdx] = tmp;
+  localStorage.setItem('wms_col_order', _prodColOrder.join(','));
+  renderProductTable();
+}
+
+function updateProdSortInd(){
+  var ind = document.getElementById('prod-sort-ind');
+  if(!ind) return;
+  if(_prodSortKey) ind.textContent = '当前按'+({sku:'条码',name:'名称',loc:'原始库位'})[_prodSortKey]+' '+(_prodSortDir==='asc'?'↑升序':'↓降序');
+  else ind.textContent = '';
+}
+
+function searchProduct(){
+  var key = document.getElementById('prod-search').value.trim().toLowerCase();
+  // 清除旧高亮
+  var rows = document.querySelectorAll('#product-tbody tr');
+  rows.forEach(function(r){ r.style.background=''; });
+  if(!key) return;
+  var list = ps();
+  if(_prodSortKey){
+    list.sort(function(a,b){
+      var va = String(a[_prodSortKey]||'').toLowerCase();
+      var vb = String(b[_prodSortKey]||'').toLowerCase();
+      var ea = !va, eb = !vb;
+      if(ea && eb) return 0;
+      if(ea) return 1;
+      if(eb) return -1;
+      if(va < vb) return _prodSortDir==='asc'?-1:1;
+      if(va > vb) return _prodSortDir==='asc'?1:-1;
+      return 0;
+    });
+  }
+  var matchIdx = -1;
+  for(var i=0;i<list.length;i++){
+    var p = list[i];
+    if(p.sku.toLowerCase()===key || p.sku.toLowerCase().indexOf(key)!==-1 || (p.loc&&p.loc.toLowerCase().indexOf(key)!==-1)){
+      matchIdx = i;
+      break;
+    }
+  }
+  if(matchIdx===-1){
+    showToast('未找到匹配的商品','error');
+    return;
+  }
+  var row = document.getElementById('prod-row-'+matchIdx);
+  if(row){
+    row.scrollIntoView({behavior:'smooth',block:'center'});
+    row.style.background = '#fff3cd';
+    row.style.transition = 'background 0.3s';
+    setTimeout(function(){ row.style.background=''; }, 2000);
+  }
+}
+
+function searchStock(){
+  var key = document.getElementById('stock-search').value.trim().toLowerCase();
+  var rows = document.querySelectorAll('#stock-result table tbody tr');
+  rows.forEach(function(r){ r.style.background=''; });
+  if(!key) return;
+  var matchIdx = -1;
+  for(var i=0;i<rows.length;i++){
+    var r = rows[i];
+    var cells = r.querySelectorAll('td');
+    var sku = cells[1]?cells[1].textContent.toLowerCase():'';
+    var loc = cells[3]?cells[3].textContent.toLowerCase():'';
+    if(sku.indexOf(key)!==-1 || loc.indexOf(key)!==-1){
+      matchIdx = i;
+      break;
+    }
+  }
+  if(matchIdx===-1){
+    showToast('未找到匹配的库存记录','error');
+    return;
+  }
+  var row = rows[matchIdx];
+  if(row){
+    row.scrollIntoView({behavior:'smooth',block:'center'});
+    row.style.background = '#fff3cd';
+    row.style.transition = 'background 0.3s';
+    setTimeout(function(){ row.style.background=''; }, 2000);
+  }
+}
+
+function sortProducts(key){
+  if(_prodSortKey===key){ _prodSortDir=_prodSortDir==='asc'?'desc':'asc'; }
+  else { _prodSortKey=key; _prodSortDir='asc'; }
+  renderProductTable();
+}
+
+function escH(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function addProductRow(){ var list=ps(); list.push({sku:'',name:'',loc:''}); savePs(list); renderProductTable(); var lastIdx=list.length-1; setTimeout(function(){ var td=document.getElementById('prod-sku-'+lastIdx); if(td) td.click(); },100); }
+function upP(i,f,v){ var list=ps(); if(list[i]){ list[i][f]=v.trim(); savePs(list); } }
+function delP(i){ var list=ps(); list.splice(i,1); savePs(list); renderProductTable(); }
+
+function saveProductTable(){
+  var list=ps().filter(function(p){ return p.sku||p.name; });
+  var seen = {};
+  var dup = [];
+  list.forEach(function(p){
+    if(seen[p.sku]) dup.push(p.sku);
+    seen[p.sku] = true;
+  });
+  if(dup.length){ showToast('重复条码'+dup.join(','),'error'); return; }
+  savePs(list); renderProductTable(); showToast('✅ 保存成功共'+list.length+'条');
+}
+
+function importProducts(e){
+  var f=e.target.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=function(ev){
+    var wb=XLSX.read(ev.target.result,{type:'array'});
+    var data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+    var list=ps();
+    var cnt=0;
+    data.forEach(function(row){
+      var sku=String(row['条码']||row['SKU']||row['sku']||'').trim();
+      var name=String(row['名称']||row['商品名称']||'').trim();
+      var loc=String(row['原始库位']||row['库位']||'').trim();
+      if(!sku) return;
+      var exist=list.find(function(p){ return p.sku===sku; });
+      if(exist){
+        if(name) exist.name=name;
+        if(loc) exist.loc=loc;
+        cnt++;
+        return;
+      }
+      list.push({sku:sku,name:name,loc:loc});
+      cnt++;
+    });
+    savePs(list); renderProductTable();
+    showToast('✅ 导入完成共处理 '+cnt+' 条新增或更新原始库位');
+  };
+  r.readAsArrayBuffer(f); e.target.value='';
+}
+
+function exportProductsExcel(){
+  var list=ps(); if(!list.length){ showToast('暂无数据','error'); return; }
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(list.map(function(p){ return {条码:p.sku,商品名称:p.name,原始库位:p.loc||''}; })), '商品');
+  XLSX.writeFile(wb,'商品信息.xlsx');
+}
+
+function importInventory(e){
+  var f=e.target.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=function(ev){
+    var wb=XLSX.read(ev.target.result,{type:'array'});
+    var data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+    var d=iv(); var cnt=0;
+    data.forEach(function(row){
+      var sku=String(row['条码']||row['SKU']||'').trim();
+      var loc=String(row['库位']||row['location']||'').trim();
+      var qty=parseInt(row['数量']||row['qty']||0);
+      if(!sku||!loc||!qty) return;
+      var ps2=ps();
+      if(!ps2.find(function(p){ return p.sku===sku; })){ ps2.push({sku:sku,name:''}); savePs(ps2); }
+      var item=d.find(function(i){ return i.sku===sku&&i.location===loc; });
+      if(item) item.qty=qty; else d.push({sku:sku,location:loc,qty:qty});
+      cnt++;
+    });
+    saveIv(d); showToast('✅ 导入'+cnt+'条'); renderDash();
+  };
+  r.readAsArrayBuffer(f); e.target.value='';
+}
+
+function exportInventoryExcel(){
+  var d=iv(); if(!d.length){ showToast('暂无数据','error'); return; }
+  var ps2=ps();
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(d.map(function(i){
+    var p=ps2.find(function(p){ return p.sku===i.sku; });
+    return {条码:i.sku,名称:p?p.name:'',库位:i.location,数量:i.qty};
+  })), '库存');
+  XLSX.writeFile(wb,'库存数据.xlsx');
+}
+
+// ===== 货位目录 =====
+function renderLocationTable(){
+  var list=locs();
+  var tb=document.getElementById('location-tbody');
+  if(!list.length){ tb.innerHTML='<tr><td colspan="5" class="empty">暂无货位点"新增行"添加</td></tr>'; return; }
+  var html='';
+  list.forEach(function(l,i){
+    html+='<tr>'
+      +'<td>'+(i+1)+'</td>'
+      +'<td><input type="text" value="'+escH(l.code)+'" onchange="upL('+i+',\'code\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
+      +'<td><input type="text" value="'+escH(l.name||'')+'" onchange="upL('+i+',\'name\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
+      +'<td><input type="text" value="'+escH(l.area||'')+'" onchange="upL('+i+',\'area\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
+      +'<td><button class="btn btn-danger btn-sm" onclick="delL('+i+')">删除</button></td>'
+      +'</tr>';
+  });
+  tb.innerHTML=html;
+}
+
+function addLocationRow(){ var list=locs(); list.push({code:'',name:'',area:''}); saveLocs(list); renderLocationTable(); }
+function upL(i,f,v){ var list=locs(); if(list[i]){ list[i][f]=v.trim(); saveLocs(list); } }
+function delL(i){ var list=locs(); list.splice(i,1); saveLocs(list); renderLocationTable(); }
+
+function saveLocationTable(){
+  var list=locs().filter(function(l){ return l.code; });
+  var seen={}; var dup=[];
+  list.forEach(function(l){ if(seen[l.code]) dup.push(l.code); seen[l.code]=true; });
+  if(dup.length){ showToast('重复库位编码'+dup.join(','),'error'); return; }
+  saveLocs(list); renderLocationTable(); showToast('✅ 保存成功共'+list.length+'条');
+}
+
+function importLocations(e){
+  var f=e.target.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=function(ev){
+    var wb=XLSX.read(ev.target.result,{type:'array'});
+    var data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+    var list=locs(); var cnt=0; var dupList=[];
+    data.forEach(function(row){
+      var code=String(row['库位编码']||row['库位']||row['编码']||'').trim();
+      var name=String(row['名称']||'').trim();
+      var area=String(row['区域']||'').trim();
+      if(!code) return;
+      var exist=list.find(function(l){ return l.code===code; });
+      if(exist){ dupList.push(code); return; }
+      if(dupList.indexOf(code)!==-1) return;
+      list.push({code:code,name:name,area:area});
+      cnt++;
+    });
+    saveLocs(list); renderLocationTable();
+    if(dupList.length>0){
+      showToast('✅ 成功导入 '+cnt+' 条'+dupList.length+' 条重复已跳过');
+    }else{
+      showToast('✅ 导入成功共 '+cnt+' 条');
+    }
+  };
+  r.readAsArrayBuffer(f); e.target.value='';
+}
+
+function exportLocationsExcel(){
+  var list=locs(); if(!list.length){ showToast('暂无数据','error'); return; }
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(list.map(function(l){ return {库位编码:l.code,库位名称:l.name||'',区域:l.area||''}; })), '货位');
+  XLSX.writeFile(wb,'货位信息.xlsx');
+}
+
+// ===== 生成库位弹窗 =====
+function openGenModal(){
+  document.getElementById('gen-modal-mask').classList.add('show');
+  document.getElementById('gen-result').innerHTML='';
+  var el = document.getElementById('gen-area');
+  if(el) el.focus();
+}
+function closeGenModal(){
+  document.getElementById('gen-modal-mask').classList.remove('show');
+}
+
+function generateLocations(){
+  var area = document.getElementById('gen-area').value.trim().toUpperCase() || 'A';
+  var rows = parseInt(document.getElementById('gen-rows').value)||3;
+  var cols = parseInt(document.getElementById('gen-cols').value)||4;
+  if(!area){ showToast('请输入区域','error'); return; }
+  var newLocs = [];
+  for(var r=1; r<=rows; r++){
+    for(var c=1; c<=cols; c++){
+      newLocs.push(area+'-'+String(r).padStart(2,'0')+'-'+String(c).padStart(2,'0'));
+    }
+  }
+  var existList = [];
+  var addList = [];
+  newLocs.forEach(function(code){
+    var found = locs().find(function(l){ return l.code===code; });
+    if(found) existList.push(code); else addList.push(code);
+  });
+  var html = '<div>';
+  html += '<p><b>生成 '+newLocs.length+' 个库位</b></p>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;">';
+  newLocs.forEach(function(code){
+    var exists = existList.indexOf(code)!==-1;
+    html += '<span class="tag" style="'+(exists?'background:#ff9800;color:white;':'background:#4caf50;color:white;')+'">'+code+(exists?' (已存在)':'')+'</span>';
+  });
+  html += '</div>';
+  if(addList.length>0){
+    html += '<button class="btn btn-primary btn-sm" onclick="confirmAddLocations()">✅ 确认添加 '+addList.length+' 个新库位</button>';
+  }
+  html += '</div>';
+  document.getElementById('gen-result').innerHTML = html;
+  window._pendingAddLocs = addList.map(function(c){ return {code:c,name:'',area:area}; });
+}
+
+function confirmAddLocations(){
+  if(!window._pendingAddLocs||!window._pendingAddLocs.length) return;
+  var list = locs();
+  window._pendingAddLocs.forEach(function(loc){ list.push(loc); });
+  saveLocs(list); renderLocationTable();
+  showToast('✅ 已添加 '+window._pendingAddLocs.length+' 个新库位');
+  document.getElementById('gen-result').innerHTML='';
+  window._pendingAddLocs = null;
+}
+
+// ===== 货位管理库存明细=====
+var _stockSortKey = '', _stockSortDir = 'asc';
+var _stockColOrder = (localStorage.getItem('wms_stock_col_order')||'sku,name,loc,qty').split(',');
+var _stockColDefs = { sku:'条码', name:'名称', loc:'库位', qty:'数量' };
+var _prodSortKey = '', _prodSortDir = 'asc';
+var _prodColOrder = (localStorage.getItem('wms_col_order')||'sku,name,loc').split(',');
+
+// 列定义
+var _colDefs = { sku:'商品条码', name:'商品名称', loc:'原始库位' };
+
+function renderStock(){
+  var d = iv().filter(function(i){ return i.qty>0; });
+  if(d.length===0){ document.getElementById('stock-result').innerHTML='<div class="empty">暂无库存数据</div>'; return; }
+  var list = d.map(function(i){
+    var p = ps().find(function(p){ return p.sku===i.sku; });
+    return {sku:i.sku, name:p?p.name:'', loc:i.location, qty:i.qty};
+  });
+  if(_stockSortKey){
+    list.sort(function(a,b){
+      var va=a[_stockSortKey], vb=b[_stockSortKey];
+      if(_stockSortKey==='qty'){ va=Number(va); vb=Number(vb); }
+      else { va=String(va||'').toLowerCase(); vb=String(vb||'').toLowerCase(); }
+      var ea = !va, eb = !vb;
+      if(ea && eb) return 0;
+      if(ea) return 1;
+      if(eb) return -1;
+      if(va<vb) return _stockSortDir==='asc'?-1:1;
+      if(va>vb) return _stockSortDir==='asc'?1:-1;
+      return 0;
+    });
+  }
+  // 固定表头：条码 名称 库位 数量
+  var html = '<div style="margin-bottom:8px;font-size:13px;color:#666;">共 <b style="color:#1a73e8;">'+list.length+'</b> 条库存记录</div>';
+  html += '<div class="table-scroll" style="max-height:50vh;overflow-y:auto;">';
+  html += '<table class="stock-table"><thead><tr>';
+  html += '<th style="width:40px;">#</th>';
+  html += '<th>条码</th>';
+  html += '<th>名称</th>';
+  html += '<th>库位</th>';
+  html += '<th style="width:60px;text-align:center;">数量</th>';
+  html += '</tr></thead><tbody>';
+  list.forEach(function(item, i){
+    html += '<tr id="stock-row-'+i+'">';
+    html += '<td>'+(i+1)+'</td>';
+    html += '<td><b>'+escH(item.sku)+'</b></td>';
+    html += '<td>'+escH(item.name)+'</td>';
+    html += '<td><span class="tag tag-blue">'+escH(item.loc)+'</span></td>';
+    html += '<td style="text-align:center;"><b style="color:#2e7d32;">'+item.qty+'</b></td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  document.getElementById('stock-result').innerHTML = html;
+  var ind = document.getElementById('sort-indicator');
+  if(_stockSortKey) ind.textContent = '当前按：'+({name:'名称',sku:'条码',qty:'数量',loc:'库位'})[_stockSortKey]+' '+(_stockSortDir==='asc'?'↑升序':'↓降序');
+  else ind.textContent = '';
+}
+
+function moveStockCol(idx, dir){
+  var newIdx = idx + dir;
+  if(newIdx<0 || newIdx>=_stockColOrder.length) return;
+  var tmp = _stockColOrder[idx];
+  _stockColOrder[idx] = _stockColOrder[newIdx];
+  _stockColOrder[newIdx] = tmp;
+  localStorage.setItem('wms_stock_col_order', _stockColOrder.join(','));
+  renderStock();
+}
+
+// ===== 初始化 =====
+renderDash();
+showToast('页面已加载完成');
