@@ -8,165 +8,55 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
 <script>
-// ===== Supabase 数据同步 =====
-const SUPABASE_URL = 'https://luavduedmnhdpqyftdgk.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1YXZkdWVkbW5oZHBxeWZ0ZGdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMDIzNDcsImV4cCI6MjA5Nzg3ODM0N30._-qKCQk79UhvMyq6byYHon3aPBhrKKC0w480hxEzlao';
+/* Supabase Cloud Sync */
+var SB_URL='https://luavduedmnhdpqyftdgk.supabase.co';
+var SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1YXZkdWVkbW5oZHBxeWZ0ZGdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMDIzNDcsImV4cCI6MjA5Nzg3ODM0N30._-qKCQk79UhvMyq6byYHon3aPBhrKKC0w480hxEzlao';
+var _sb=null;
+function sb(){if(!_sb)_sb=window.supabase&&window.supabase.createClient?window.supabase.createClient(SB_URL,SB_KEY):null;return _sb}
 
-// 初始化 Supabase 客户端
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// 从 Supabase 加载数据
-async function loadFromSupabase() {
-    try {
-        showToast('正在从云端加载数据...', '');
-        
-        // 从 wms_data 表读取所有数据
-        const { data, error } = await supabase
-            .from('wms_data')
-            .select('*');
-        
-        if (error) throw error;
-        
-        // 解析数据并存入 localStorage
-        if (data && data.length > 0) {
-            data.forEach(function(row) {
-                if (row.data_type === 'products') {
-                    localStorage.setItem('wms_p', JSON.stringify(row.data));
-                } else if (row.data_type === 'inventory') {
-                    localStorage.setItem('wms_i', JSON.stringify(row.data));
-                } else if (row.data_type === 'locations') {
-                    localStorage.setItem('wms_loc', JSON.stringify(row.data));
-                } else if (row.data_type === 'inbound_records') {
-                    localStorage.setItem('wms_in_recs', JSON.stringify(row.data));
-                }
-            });
-            
-            showToast('云端数据加载成功！', 'success');
-            
-            // 刷新页面显示
-            setTimeout(function() {
-                location.reload();
-            }, 1000);
-        } else {
-            showToast('云端暂无数据，将使用本地数据', '');
-        }
-    } catch (error) {
-        console.error('加载云端数据失败:', error);
-        showToast('加载云端数据失败: ' + error.message, 'error');
-    }
+async function loadFromSupabase(){
+  var client=sb();if(!client){showToast('Supabase not loaded','error');return}
+  try{
+    showToast('Loading...','');
+    var r=await client.from('wms_data').select('*');
+    if(r.error)throw r.error;
+    if(r.data&&r.data.length>0){
+      for(var i=0;i<r.data.length;i++){
+        var row=r.data[i];
+        if(row.data_type==='products')localStorage.setItem('wms_p',JSON.stringify(row.data));
+        else if(row.data_type==='inventory')localStorage.setItem('wms_i',JSON.stringify(row.data));
+        else if(row.data_type==='locations')localStorage.setItem('wms_loc',JSON.stringify(row.data));
+        else if(row.data_type==='inbound_records')localStorage.setItem('wms_in_recs',JSON.stringify(row.data));
+      }
+      showToast('Loaded!','success');setTimeout(function(){location.reload()},1000);
+    }else{showToast('No cloud data','')}
+  }catch(e){showToast('Load err:'+e.message,'error')}
 }
 
-// 保存数据到 Supabase
-async function saveToSupabase(dataType, data) {
-    try {
-        // 检查是否已存在
-        const { data: existing, error: selError } = await supabase
-            .from('wms_data')
-            .select('id')
-            .eq('data_type', dataType)
-            .single();
-        
-        if (existing) {
-            // 更新
-            const { error } = await supabase
-                .from('wms_data')
-                .update({ data: data, updated_at: new Date() })
-                .eq('data_type', dataType);
-            
-            if (error) throw error;
-        } else {
-            // 插入
-            const { error } = await supabase
-                .from('wms_data')
-                .insert([{ data_type: dataType, data: data }]);
-            
-            if (error) throw error;
-        }
-    } catch (error) {
-        console.error('保存数据失败:', error);
-        throw error;
-    }
+async function saveSB(dt,d){
+  var client=sb();if(!client)throw new Error('Supabase not ready');
+  var ex=await client.from('wms_data').select('id').eq('data_type',dt).maybeSingle();
+  if(ex.data){var r=await client.from('wms_data').update({data:d,updated_at:new Date().toISOString()}).eq('data_type',dt);if(r.error)throw r.error}
+  else{var r=await client.from('wms_data').insert([{data_type:dt,data:d}]);if(r.error)throw r.error}
 }
 
-// 同步所有数据到云端
-async function syncAllToCloud() {
-    showToast('正在同步到云端...', '');
-    
-    try {
-        // 保存商品
-        const products = JSON.parse(localStorage.getItem('wms_p') || '[]');
-        await saveToSupabase('products', products);
-        
-        // 保存库存
-        const inventory = JSON.parse(localStorage.getItem('wms_i') || '[]');
-        await saveToSupabase('inventory', inventory);
-        
-        // 保存货位
-        const locations = JSON.parse(localStorage.getItem('wms_loc') || '{}');
-        await saveToSupabase('locations', locations);
-        
-        // 保存入库记录
-        const records = JSON.parse(localStorage.getItem('wms_in_recs') || '[]');
-        await saveToSupabase('inbound_records', records);
-        
-        showToast('所有数据已同步到云端！', 'success');
-    } catch (error) {
-        showToast('同步失败: ' + error.message, 'error');
-    }
+async function syncAllToCloud(){
+  try{showToast('Syncing...','');
+    await saveSB('products',JSON.parse(localStorage.getItem('wms_p')||'[]'));
+    await saveSB('inventory',JSON.parse(localStorage.getItem('wms_i')||'[]'));
+    await saveSB('locations',JSON.parse(localStorage.getItem('wms_loc')||'{}'));
+    await saveSB('inbound_records',JSON.parse(localStorage.getItem('wms_in_recs')||'[]'));
+    showToast('Done!','success')}
+  catch(e){showToast('Err:'+e.message,'error')}
 }
 
-// 页面加载时自动同步
-document.addEventListener('DOMContentLoaded', function() {
-    // 延迟加载，确保其他组件先初始化
-    setTimeout(function() {
-        // 检查是否已经有本地数据
-        const hasLocalData = localStorage.getItem('wms_p') && 
-                            JSON.parse(localStorage.getItem('wms_p')).length > 0;
-        
-        if (!hasLocalData) {
-            // 没有本地数据，从云端加载
-            loadFromSupabase();
-        }
-    }, 2000);
+document.addEventListener('DOMContentLoaded',function(){
+  setTimeout(function(){
+    var p=localStorage.getItem('wms_p');
+    if(!p||!JSON.parse(p).length)loadFromSupabase();
+  },2000);
 });
-
-// 点击头部触发设置
-var _hdrClicks = 0;
-var _hdrTimer = null;
-
-function onHeaderClick(){
-    _hdrClicks++;
-    clearTimeout(_hdrTimer);
-    _hdrTimer = setTimeout(function(){
-        if(_hdrClicks >= 7){ askResetPassword(); }
-        else if(_hdrClicks >= 3){ 
-            document.getElementById('cloud-modal').style.display = 'flex'; 
-        }
-        _hdrClicks = 0;
-    }, 3000);
-}
-
-function askResetPassword(){
-    var pwd = prompt("请输入初始化密码：");
-    if(pwd !== "Zw190806"){
-        if(pwd !== null) showToast("密码错误，操作已取消", "error");
-        return;
-    }
-    if(!confirm("确定要清除所有数据吗？
-
-将清除：商品、入库记录、货位目录等所有本地数据！
-
-此操作不可恢复！")) return;
-    localStorage.removeItem("wms_p");
-    localStorage.removeItem("wms_i");
-    localStorage.removeItem("wms_l");
-    localStorage.removeItem("wms_loc");
-    localStorage.removeItem("wms_in_recs");
-    showToast("数据已清除，页面将刷新", "success");
-    setTimeout(function(){ location.reload(); }, 1000);
-}
 </script>
-
 
 <style>
 * { margin:0; padding:0; box-sizing: border-box; }
@@ -308,7 +198,8 @@ tr:active { background: #f0f4ff; }
 </head>
 <body>
 
-<div class="header" style="display:flex;align-items:center;justify-content:center;" onclick="onHeaderClick()">
+
+<div class="header" style="display:flex;align-items:center;justify-content:center;" >
   📦 仓库库存管理
 </div>
 
@@ -1531,18 +1422,33 @@ showToast('页面已加载完成');
 </script>
 <div id="toast" class="toast"></div>
 <div id="debug-err" style="display:none;position:fixed;bottom:0;left:0;width:100%;max-height:40vh;overflow-y:auto;background:#fff3cd;color:#856404;font-size:12px;padding:8px 10px;border-top:2px solid #ffe58f;z-index:9999;"></div>
+<div id="cloud-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999"><div style="background:#fff;border-radius:12px;padding:20px;width:90%;max-width:400px;margin:auto;position:relative;top:50%;transform:translateY(-50%)"><h3 style="margin-bottom:16px;color:#1a73e8">Cloud Sync</h3><button class="btn" style="width:100%;margin-bottom:8px;background:#4CAF50;color:#fff" onclick="syncAllToCloud()">Upload</button><button class="btn" style="width:100%;margin-bottom:8px;background:#2196F3;color:#fff" onclick="loadFromSupabase()">Download</button><button class="btn" style="width:100%;background:#f44336;color:#fff" onclick="this.closest(&apos;#cloud-modal&apos;).style.display=&apos;none&apos;">Close</button></div></div>
 
-<div id="cloud-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;">
-  <div style="background:white;border-radius:12px;padding:20px;width:90%;max-width:400px;margin:auto;position:relative;top:50%;transform:translateY(-50%);">
-    <h3 style="margin-bottom:16px;color:#1a73e8;">☁️ 云端数据同步</h3>
-    <div style="margin-bottom:12px;">
-      <button class="btn" style="width:100%;margin-bottom:8px;background:#4CAF50;color:white;" onclick="syncAllToCloud()">⬆️ 推送数据到云端</button>
-      <button class="btn" style="width:100%;margin-bottom:8px;background:#2196F3;color:white;" onclick="loadFromSupabase()">⬇️ 从云端拉取数据</button>
-      <button class="btn" style="width:100%;background:#f44336;color:white;" onclick="document.getElementById('cloud-modal').style.display='none'">关闭</button>
-    </div>
-  </div>
-</div>
+<script>
+(function(){
+  var _c=0, _t=null;
+  function onClickHeader(){
+    _c++; clearTimeout(_t);
+    _t=setTimeout(function(){
+      if(_c>=7){
+        var p=prompt('Password:');
+        if(p!=='Zw190806'){if(p!==null)alert('Wrong');return}
+        if(!confirm('Reset ALL data?'))return;
+        ['wms_p','wms_i','wms_l','wms_loc','wms_in_recs'].forEach(function(k){localStorage.removeItem(k)});
+        alert('Data cleared'); setTimeout(function(){location.reload()},800);
+      } else if(_c>=3){
+        var m=document.getElementById('cloud-modal'); if(m)m.style.display='flex';
+      }
+      _c=0;
+    },3000);
+  }
+  // Attach to header
+  var hdr=document.querySelector('.header');
+  if(hdr){ hdr.style.cursor='pointer'; hdr.addEventListener('click', onClickHeader); }
+  // Also expose globally (for safety)
+  window.onHeaderClick = onClickHeader;
+})();
+</script>
 
 </body>
 </html>
-
