@@ -277,7 +277,7 @@ async function syncAllToCloud(silent){
 
 /* ===== AUTO SYNC: 数据变动后自动推送到云端 ===== */
 var _autoSyncTimer=null;
-var _autoSyncDelay=800; // 0.8秒防抖，操作后立即同步
+var _autoSyncDelay=300; // 0.3秒防抖，操作后立即同步
 var _syncStartTime = 0; // 记录同步开始时间，防止卡死
 
 function triggerAutoSync(){
@@ -428,8 +428,10 @@ function _syncNowFetch() {
 }
 
 /* 新设备自动从云端拉取数据 */
-document.addEventListener('DOMContentLoaded', function() {
+// 直接执行初始化（不依赖 DOMContentLoaded，因为脚本是在 DOM 加载完后才执行的）
+(function _initOnLoad() {
   function tryInit() {
+    // supabase-js@2 的全局变量名是 window.supabase（全小写）
     if (window.supabase && window.supabase.createClient) { _initAutoLoad(); return true; }
     return false;
   }
@@ -452,7 +454,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // 首次拉取云端数据哈希（用于后续对比变化）
     setTimeout(function(){ _pullLatestFromCloud(); }, 2000);
   }
-});
+})();
 </script>
 
 <style>
