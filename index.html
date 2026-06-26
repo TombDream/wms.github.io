@@ -73,11 +73,21 @@ window.addEventListener('beforeunload',function(){
   if(_autoSyncTimer) syncAllToCloud();
 });
 
+/* 新设备自动从云端拉取数据 */
 document.addEventListener('DOMContentLoaded',function(){
-  setTimeout(function(){
-    var p=localStorage.getItem('wms_p');
-    if(!p||!JSON.parse(p).length)loadFromSupabase();
-  },2000);
+  // 等待 Supabase JS 加载完成
+  var _sbAttempts=0;
+  var _sbCheck=setInterval(function(){
+    _sbAttempts++;
+    if(window.supabase&&window.supabase.createClient){
+      clearInterval(_sbCheck);
+      var p=localStorage.getItem('wms_p');
+      if(!p||!JSON.parse(p||'[]').length){
+        showToast('正在从云端获取数据...','');
+        loadFromSupabase();
+      }
+    }else if(_sbAttempts>40){clearInterval(_sbCheck)}
+  },500);
 });
 </script>
 
