@@ -1071,61 +1071,83 @@ var _scanTargetId = '';
 function startScan(targetId){
   _scanTargetId = targetId;
   document.getElementById('scan-modal').classList.add('show');
-  document.getElementById('scan-tip').textContent = '对准条码自动识别';
+  document.getElementById('scan-tip').textContent = '正在启动摄像头...';
 
-  // 启动 Quagga 实时视频流（优化配置，避免闪退）
-  Quagga.init({
-    inputStream: {
-      name: 'Live',
-      type: 'LiveStream',
-      target: document.getElementById('scan-interactive'),
-      constraints: {
-        width: { ideal: 640 },  // 降低分辨率，避免CPU占用过高
-        height: { ideal: 480 },
-        facingMode: 'environment',  // 优先使用后置摄像头
-        aspectRatio: { ideal: 1.3333333333 }
-      }
-    },
-    decoder: {
-      readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader'],
-      multiple: false  // 一次只识别一个条码
-    },
-    locator: {
-      patchSize: 'medium',  // 中等大小，平衡性能和准确率
-      halfSample: true  // 使用半采样，降低CPU占用
-    },
-    numOfWorkers: 0,  // 不使用Web Worker，避免某些手机崩溃
-    frequency: 10,  // 降低解码频率（默认10），减少CPU占用
-    locate: true
-  }, function(err) {
-    if (err) {
-      console.error('Quagga init error:', err);
-      document.getElementById('scan-tip').textContent = '摄像头启动失败，请检查权限';
-      return;
-    }
-    Quagga.start();
-  });
+  var video = document.getElementById('scan-video');
+  var canvas = document.getElementById('scan-canvas');
+  var ctx = canvas.getContext('2d');
+  var scanning = true;
+  var scanTimer = null;
 
-  // 监听扫码成功事件
-  Quagga.onDetected(function(result) {
-    if (result && result.codeResult && result.codeResult.code) {
-      var code = result.codeResult.code;
-      Quagga.stop();
-      stopScan();
-      var el = document.getElementById(_scanTargetId);
-      if(el){ el.value = code; }
-      if(_scanTargetId==='out-search') onOutSearch();
-      if(_scanTargetId==='q-key') doQuery();
-      if(_scanTargetId==='prod-search') searchProduct();
-      if(_scanTargetId==='stock-search') searchStock();
-      if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
-      if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+  // 用原生 API 获取摄像头（兼容性最好）
+  navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'environment',
+      width: { ideal: 640 },
+      height: { ideal: 480 }
     }
+  }).then(function(stream) {
+    video.srcObject = stream;
+    video.play();
+    document.getElementById('scan-tip').textContent = '对准条码自动识别';
+
+    // 定时截屏解码（每800ms一次，平衡性能和响应速度）
+    scanTimer = setInterval(function(){
+      if(!scanning) return;
+      if(video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+
+      // 用 Quagga 单次解码截图
+      try {
+        Quagga.decodeSingle({
+          decoder: {
+            readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader']
+          },
+          locate: false,
+          src: canvas.toDataURL('image/png')
+        }, function(result) {
+          if(!scanning) return;
+          if(result && result.codeResult && result.codeResult.code){
+            var code = result.codeResult.code;
+            scanning = false;
+            clearInterval(scanTimer);
+            try{ stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
+            stopScan();
+
+            var el = document.getElementById(_scanTargetId);
+            if(el){ el.value = code; }
+            if(_scanTargetId==='out-search') onOutSearch();
+            if(_scanTargetId==='q-key') doQuery();
+            if(_scanTargetId==='prod-search') searchProduct();
+            if(_scanTargetId==='stock-search') searchStock();
+            if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
+            if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+          }
+        });
+      } catch(e) {}
+    }, 800);
+
+    window._scanCleanup = function(){
+      scanning = false;
+      if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
+      try{ stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
+    };
+  }).catch(function(err) {
+    console.error('Camera error:', err);
+    document.getElementById('scan-tip').textContent = '无法访问摄像头：'+err.message;
   });
 }
 
 function stopScan(){
-  try { Quagga.stop(); } catch(e) {}
+  if(window._scanCleanup){ window._scanCleanup(); window._scanCleanup = null; }
+  var video = document.getElementById('scan-video');
+  if(video && video.srcObject){
+    try{ video.srcObject.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
+    video.srcObject = null;
+  }
   document.getElementById('scan-modal').classList.remove('show');
   document.getElementById('scan-tip').textContent = '';
 }
