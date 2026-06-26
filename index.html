@@ -6,8 +6,143 @@
 <title>仓库库存管理</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
+// ===== 扫码：html5-qrcode 实时扫描（支持所有条码格式）=====
+var _scanTargetId = '';
+var _html5QrCode = null;
+var _scanning = false;
+
+function startScan(targetId) {
+  _scanTargetId = targetId;
+  _scanning = true;
+
+  var modal = document.getElementById('scan-modal');
+  modal.classList.add('show');
+  var tip = document.getElementById('scan-tip');
+  tip.textContent = '正在启动摄像头...';
+
+  // 清理上一次实例
+  if (_html5QrCode) {
+    try { _html5QrCode.stop(); } catch(e) {}
+    _html5QrCode = null;
+  }
+
+  var scanRegion = document.getElementById('scan-interactive');
+  scanRegion.innerHTML = '<div id="qr-reader" style="width:100%;height:100%;border-radius:12px;overflow:hidden;"></div>';
+
+  // html5-qrcode 配置：关键！必须指定 formats 包含一维条码
+  var config = {
+    fps: 15,                          // 每秒15帧，响应快
+    qrbox: { width: 250, height: 150 }, // 扫描框大小
+    aspectRatio: 1.3333,
+    formatsToSupport: [
+      'EAN_13',   // 商品条码（最常见）
+      'EAN_8',
+      'UPC_A',
+      'UPC_E',
+      'CODE_128', // 物流条码
+      'CODE_39',
+      'ITF',
+      'CODABAR'
+    ]
+  };
+
+  _html5QrCode = new Html5Qrcode("qr-reader");
+
+  _html5QrCode.start(
+    { facingMode: "environment" },
+    config,
+    function(decodedText) {
+      // 扫码成功
+      if (!_scanning) return;
+      var code = decodedText.trim();
+      console.log('[扫码成功]', code);
+      stopScan();
+      fillScanResult(code);
+    },
+    function(errorMessage) {
+      // 忽略扫描过程中的正常错误信息
+    }
+  ).catch(function(err) {
+    console.error('Html5Qrcode start error:', err);
+    tip.textContent = '无法访问摄像头';
+    showPhotoFallback();
+  });
+
+  tip.textContent = '对准条码自动识别...';
+}
+
+// 拍照降级方案（摄像头实时不可用时）
+function showPhotoFallback() {
+  var region = document.getElementById('scan-interactive');
+  region.innerHTML = ''
+    + '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:20px;padding:20px;">'
+    + '  <div style="color:#fff;font-size:15px;text-align:center;line-height:1.8;">📷 实时扫码不可用<br>请拍照后自动识别</div>'
+    + '  <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none" onchange="onScanPhoto(event)">'
+    + '  <button onclick="document.getElementById(\'scan-file-input\').click()"'
+    + '    style="background:#fff;color:#1a73e8;font-size:16px;padding:14px 36px;border-radius:28px;border:none;font-weight:bold;">'
+    + '    📷 拍照识别'
+    + '  </button>'
+    + '  <button onclick="stopScan()"'
+    + '    style="background:rgba(255,255,255,0.15);color:#fff;font-size:14px;padding:10px 24px;border-radius:20px;border:none;">取消</button>'
+    + '</div>';
+}
+
+function stopScan() {
+  _scanning = false;
+  if (_html5QrCode) {
+    try { _html5QrCode.stop().then(function(){ _html5QrCode = null; }).catch(function(){}); } catch(e) {}
+    _html5QrCode = null;
+  }
+  document.getElementById('scan-modal').classList.remove('show');
+  document.getElementById('scan-tip').textContent = '';
+  // 恢复初始内容
+  var region = document.getElementById('scan-interactive');
+  region.innerHTML = '<div id="qr-reader" style="width:100%;height:100%;border-radius:12px;overflow:hidden;"></div>';
+}
+
+function onScanPhoto(event) {
+  var file = event.target.files[0];
+  if (!file) return;
+  document.getElementById('scan-tip').textContent = '识别中...';
+
+  if (!_html5QrCode) {
+    _html5QrCode = new Html5Qrcode("scan-interactive");
+  }
+
+  _html5QrCode.scanFile(file, true)
+    .then(function(code){
+      code = code.trim();
+      console.log('[拍照扫码成功]', code);
+      stopScan();
+      fillScanResult(code);
+    })
+    .catch(function(err){
+      showToast('未识别到条码，请重试', 'error');
+      document.getElementById('scan-tip').textContent = '';
+      event.target.value = '';
+    });
+}
+
+function fillScanResult(code) {
+  stopScan();
+  var el = document.getElementById(_scanTargetId);
+  if (el) { el.value = code; }
+  // 触发后续操作
+  if (_scanTargetId === 'out-search') onOutSearch();
+  if (_scanTargetId === 'q-key') doQuery();
+  if (_scanTargetId === 'prod-search') searchProduct();
+  if (_scanTargetId === 'stock-search') searchStock();
+  if (_scanTargetId === 'in-sku') {
+    onInSkuBlur();
+    setTimeout(function () { var e = document.getElementById('in-loc'); if (e) e.focus(); }, 300);
+  }
+  if (_scanTargetId === 'in-loc') {
+    setTimeout(function () { var e = document.getElementById('in-qty'); if (e) e.focus(); }, 300);
+  }
+}
+
 /* ===== 提示消息（提前定义，供后续代码调用）===== */
 function showToast(msg, type){
   type = type || 'success';
@@ -1063,178 +1198,6 @@ function renderDash(){
   });
   html += '</table></div>';
   document.getElementById('recent-logs').innerHTML = html;
-}
-
-// ===== 扫码：拍照识别（稳定不崩溃）=====
-var _scanTargetId = '';
-var _scanStream = null;
-var _scanTimer = null;
-var _barcodeDetector = null;
-
-// 初始化 BarcodeDetector（兼容性检测）
-function initBarcodeDetector(cb){
-  if(_barcodeDetector){ cb(true); return; }
-  if(!window.BarcodeDetector){
-    cb(false); return;
-  }
-  BarcodeDetector.getSupportedFormats().then(function(formats){
-    console.log('Barcode formats:', formats);
-    _barcodeDetector = new BarcodeDetector({ formats: formats });
-    cb(true);
-  }).catch(function(){
-    cb(false);
-  });
-}
-
-function startScan(targetId){
-  _scanTargetId = targetId;
-  document.getElementById('scan-modal').classList.add('show');
-  var tip = document.getElementById('scan-tip');
-  tip.textContent = '正在启动摄像头...';
-
-  // 恢复 scan-interactive 内容
-  var region = document.getElementById('scan-interactive');
-  region.innerHTML = '<video id="scan-video" style="width:100%;height:100%;object-fit:cover;" playsinline muted></video>';
-
-  // 先尝试 BarcodeDetector（Chrome/Android 原生支持，最快最准）
-  initBarcodeDetector(function(ok){
-    if(ok){
-      startCameraScan();
-    } else {
-      // 不支持 BarcodeDetector → 降级为拍照识别
-      tip.textContent = '实时扫码不可用，请拍照识别';
-      showPhotoFallback();
-    }
-  });
-}
-
-function startCameraScan(){
-  var tip = document.getElementById('scan-tip');
-  var video = document.getElementById('scan-video');
-
-  navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-  }).then(function(stream){
-    _scanStream = stream;
-    video.srcObject = stream;
-    video.play();
-    tip.textContent = '对准条码自动识别';
-
-    // 定时截帧识别（每 500ms，响应快）
-    _scanTimer = setInterval(function(){
-      if(!_barcodeDetector || video.readyState < video.HAVE_ENOUGH_DATA) return;
-      var canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0);
-      _barcodeDetector.detect(canvas).then(function(results){
-        if(results && results.length > 0){
-          var code = results[0].rawValue.trim();
-          console.log('Barcode detected:', code, 'format:', results[0].format);
-          stopScan();
-          fillScanResult(code);
-        }
-      }).catch(function(){});
-    }, 500);
-
-  }).catch(function(err){
-    console.error('Camera error:', err);
-    tip.textContent = '无法访问摄像头：' + (err.message||'未知错误');
-    showPhotoFallback();
-  });
-}
-
-// 降级：拍照识别（用 Quagga2 decodeSingle）
-function showPhotoFallback(){
-  var region = document.getElementById('scan-interactive');
-  region.innerHTML = ''
-    + '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:20px;padding:20px;">'
-    + '  <div style="color:#fff;font-size:15px;text-align:center;line-height:1.8;">📷 实时扫码不可用<br>请拍照后自动识别</div>'
-    + '  <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none" onchange="onScanPhoto(event)">'
-    + '  <button onclick="document.getElementById(\'scan-file-input\').click()" style="background:#fff;color:#1a73e8;font-size:16px;padding:14px 36px;border-radius:28px;border:none;font-weight:bold;">📷 拍照识别</button>'
-    + '  <button onclick="stopScan()" style="background:rgba(255,255,255,0.15);color:#fff;font-size:14px;padding:10px 24px;border-radius:20px;border:none;">取消</button>'
-    + '</div>';
-}
-
-function onScanPhoto(event){
-  var file = event.target.files[0];
-  if(!file) return;
-  document.getElementById('scan-tip').textContent = '识别中...';
-
-  var img = new Image();
-  img.onload = function(){
-    var canvas = document.createElement('canvas');
-    canvas.width = img.width;
-    canvas.height = img.height;
-    canvas.getContext('2d').drawImage(img, 0, 0);
-
-    // 优先用 BarcodeDetector
-    if(_barcodeDetector){
-      _barcodeDetector.detect(canvas).then(function(results){
-        if(results && results.length > 0){
-          fillScanResult(results[0].rawValue.trim());
-        } else {
-          showToast('未识别到条码，请重新拍照', 'error');
-          document.getElementById('scan-tip').textContent = '对准条码自动识别';
-        }
-      }).catch(function(){
-        // BarcodeDetector 失败，尝试 Quagga2
-        decodeWithQuagga(canvas);
-      });
-    } else {
-      decodeWithQuagga(canvas);
-    }
-  };
-  img.src = URL.createObjectURL(file);
-}
-
-function decodeWithQuagga(canvas){
-  try {
-    Quagga.decodeSingle({
-      decoder: {
-        readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader']
-      },
-      locate: true,
-      src: canvas.toDataURL('image/png')
-    }, function(result) {
-      if(result && result.codeResult && result.codeResult.code){
-        fillScanResult(result.codeResult.code.trim());
-      } else {
-        showToast('未识别到条码，请重新拍照', 'error');
-        document.getElementById('scan-tip').textContent = '对准条码自动识别';
-      }
-    });
-  } catch(e) {
-    showToast('未识别到条码，请重新拍照', 'error');
-    document.getElementById('scan-tip').textContent = '对准条码自动识别';
-  }
-}
-
-function fillScanResult(code){
-  stopScan();
-  var el = document.getElementById(_scanTargetId);
-  if(el){ el.value = code; }
-  if(_scanTargetId==='out-search') onOutSearch();
-  if(_scanTargetId==='q-key') doQuery();
-  if(_scanTargetId==='prod-search') searchProduct();
-  if(_scanTargetId==='stock-search') searchStock();
-  if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
-  if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
-}
-
-function stopScan(){
-  if(_scanTimer){ clearInterval(_scanTimer); _scanTimer = null; }
-  if(_scanStream){
-    _scanStream.getTracks().forEach(function(t){ t.stop(); });
-    _scanStream = null;
-  }
-  var video = document.getElementById('scan-video');
-  if(video && video.srcObject){ video.srcObject = null; }
-  document.getElementById('scan-modal').classList.remove('show');
-  document.getElementById('scan-tip').textContent = '';
-  // 恢复 scan-interactive 初始内容
-  var region = document.getElementById('scan-interactive');
-  region.innerHTML = '<video id="scan-video" style="width:100%;height:100%;object-fit:cover;" playsinline muted></video>';
 }
 
 // ===== 入库 =====
