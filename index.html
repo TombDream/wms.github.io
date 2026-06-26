@@ -660,10 +660,13 @@ tr:active { background: #f0f4ff; }
 
 <!-- 扫码弹窗 -->
 <div id="scan-modal">
-  <div class="scan-close" onclick="stopScan()">&times;</div>
-  <div id="scan-interactive"></div>
-  <div class="scan-tip">将条码对准摄像头，自动识别</div>
-  <div class="scan-result" id="scan-result"></div>
+  <div class="scan-close" onclick="stopScan()">×</div>
+  <div id="scan-interactive" style="width:100%;height:100%;position:relative;">
+    <video id="scan-video" style="width:100%;height:100%;object-fit:cover;"></video>
+    <canvas id="scan-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
+    <div id="scan-tip" style="position:absolute;bottom:60px;left:0;width:100%;text-align:center;color:#fff;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,0.5);">对准条码自动识别</div>
+  </div>
+  <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none" onchange="onScanPhoto(event)">
 </div>
 
 <!-- 出库确认弹窗（底部弹窗） -->
@@ -1062,86 +1065,69 @@ function renderDash(){
   document.getElementById('recent-logs').innerHTML = html;
 }
 
-// ===== 扫码Quagga2安卓+iOS通用=====
+// ===== 扫码：拍照识别（稳定不崩溃）=====
+var _scanTargetId = '';
+
 function startScan(targetId){
-  scanTargetId = targetId;
-  document.getElementById('scan-result').textContent = '';
+  _scanTargetId = targetId;
   document.getElementById('scan-modal').classList.add('show');
+  document.getElementById('scan-tip').textContent = '对准条码自动识别';
 
-  Quagga.onDetected(function(result) {
-    var code = result.codeResult.code;
-    if(!code) return;
-    Quagga.offDetected();
-    stopScan();
-    var el = document.getElementById(scanTargetId);
-    if(el){ el.value = code; }
-    if(scanTargetId==='out-search') onOutSearch();
-    if(scanTargetId==='q-key') doQuery();
-    if(scanTargetId==='prod-search') searchProduct();
-    if(scanTargetId==='stock-search') searchStock();
-    if(scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
-    if(scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
-  });
-
+  // 启动 Quagga 实时视频流（优化配置，避免闪退）
   Quagga.init({
     inputStream: {
       name: 'Live',
       type: 'LiveStream',
       target: document.getElementById('scan-interactive'),
       constraints: {
-        facingMode: 'environment',
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
+        width: { ideal: 640 },  // 降低分辨率，避免CPU占用过高
+        height: { ideal: 480 },
+        facingMode: 'environment',  // 优先使用后置摄像头
+        aspectRatio: { ideal: 1.3333333333 }
       }
     },
     decoder: {
-      readers: [
-        'ean_reader',
-        'upc_reader',
-        'upc_e_reader',
-        'code_128_reader',
-        'code_39_reader',
-        'itf_reader',
-        'codabar_reader'
-      ],
-      multiple: false
+      readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader'],
+      multiple: false  // 一次只识别一个条码
     },
-    locate: true,
-    numOfWorkers: 0
+    locator: {
+      patchSize: 'medium',  // 中等大小，平衡性能和准确率
+      halfSample: true  // 使用半采样，降低CPU占用
+    },
+    numOfWorkers: 0,  // 不使用Web Worker，避免某些手机崩溃
+    frequency: 10,  // 降低解码频率（默认10），减少CPU占用
+    locate: true
   }, function(err) {
-    if(err) {
-      Quagga.init({
-        inputStream: {
-          name: 'Live',
-          type: 'LiveStream',
-          target: document.getElementById('scan-interactive')
-        },
-        decoder: {
-          readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader'],
-          multiple: false
-        },
-        locate: true,
-        numOfWorkers: 0
-      }, function(err2) {
-        if(err2) {
-          showToast('无法打开摄像头请允许相机权限', 'error');
-          stopScan();
-          return;
-        }
-        Quagga.start();
-      });
+    if (err) {
+      console.error('Quagga init error:', err);
+      document.getElementById('scan-tip').textContent = '摄像头启动失败，请检查权限';
       return;
     }
     Quagga.start();
   });
+
+  // 监听扫码成功事件
+  Quagga.onDetected(function(result) {
+    if (result && result.codeResult && result.codeResult.code) {
+      var code = result.codeResult.code;
+      Quagga.stop();
+      stopScan();
+      var el = document.getElementById(_scanTargetId);
+      if(el){ el.value = code; }
+      if(_scanTargetId==='out-search') onOutSearch();
+      if(_scanTargetId==='q-key') doQuery();
+      if(_scanTargetId==='prod-search') searchProduct();
+      if(_scanTargetId==='stock-search') searchStock();
+      if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
+      if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+    }
+  });
 }
 
 function stopScan(){
+  try { Quagga.stop(); } catch(e) {}
   document.getElementById('scan-modal').classList.remove('show');
-  try {
-    Quagga.stop();
-    document.getElementById('scan-interactive').innerHTML = '';
-  } catch(e) {}
+  document.getElementById('scan-tip').textContent = '';
 }
 
 // ===== 入库 =====
