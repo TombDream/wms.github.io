@@ -50,6 +50,29 @@ async function syncAllToCloud(){
   catch(e){showToast('Err:'+e.message,'error')}
 }
 
+/* ===== AUTO SYNC: 数据变动后自动推送到云端 ===== */
+var _autoSyncTimer=null;
+var _autoSyncDelay=3000; // 3秒防抖
+
+function triggerAutoSync(){
+  clearTimeout(_autoSyncTimer);
+  _autoSyncTimer=setTimeout(function(){
+    syncAllToCloud();
+  },_autoSyncDelay);
+}
+
+// 监听 localStorage 变化（wms_* 开头的关键字）
+var _origSetItem=localStorage.setItem;
+localStorage.setItem=function(k,v){
+  _origSetItem.apply(this,arguments);
+  if(k&&k.startsWith('wms_')) triggerAutoSync();
+};
+
+// 页面关闭前强制同步一次
+window.addEventListener('beforeunload',function(){
+  if(_autoSyncTimer) syncAllToCloud();
+});
+
 document.addEventListener('DOMContentLoaded',function(){
   setTimeout(function(){
     var p=localStorage.getItem('wms_p');
