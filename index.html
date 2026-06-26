@@ -8,29 +8,59 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
 <script>
+/* ===== 提示消息（提前定义，供后续代码调用）===== */
+function showToast(msg, type){
+  type = type || 'success';
+  var el = document.getElementById('toast');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'toast ' + type;
+  el.style.display = 'block';
+  setTimeout(function(){ el.style.display = 'none'; }, 3000);
+}
+
 /* Supabase Cloud Sync */
 var SB_URL='https://luavduedmnhdpqyftdgk.supabase.co';
 var SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1YXZkdWVkbW5oZHBxeWZ0ZGdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMDIzNDcsImV4cCI6MjA5Nzg3ODM0N30._-qKCQk79UhvMyq6byYHon3aPBhrKKC0w480hxEzlao';
 var _sb=null;
 function sb(){if(!_sb)_sb=window.supabase&&window.supabase.createClient?window.supabase.createClient(SB_URL,SB_KEY):null;return _sb}
 
-async function loadFromSupabase(){
-  var client=sb();if(!client){showToast('Supabase not loaded','error');return}
+async function loadFromSupabase(silent){
+  var client=sb();if(!client){if(!silent)showToast('Supabase not loaded','error');return}
   try{
-    showToast('Loading...','');
+    if(!silent) showToast('正在连接云端...','');
     var r=await client.from('wms_data').select('*');
     if(r.error)throw r.error;
     if(r.data&&r.data.length>0){
+      _autoSyncPaused=true;
       for(var i=0;i<r.data.length;i++){
         var row=r.data[i];
-        if(row.data_type==='products')localStorage.setItem('wms_p',JSON.stringify(row.data));
-        else if(row.data_type==='inventory')localStorage.setItem('wms_i',JSON.stringify(row.data));
-        else if(row.data_type==='locations')localStorage.setItem('wms_loc',JSON.stringify(row.data));
-        else if(row.data_type==='inbound_records')localStorage.setItem('wms_in_recs',JSON.stringify(row.data));
+        if(row.data_type==='products')_origSetItem.call(localStorage,'wms_p',JSON.stringify(row.data));
+        else if(row.data_type==='inventory')_origSetItem.call(localStorage,'wms_i',JSON.stringify(row.data));
+        else if(row.data_type==='locations')_origSetItem.call(localStorage,'wms_loc',JSON.stringify(row.data));
+        else if(row.data_type==='inbound_records')_origSetItem.call(localStorage,'wms_in_recs',JSON.stringify(row.data));
       }
-      showToast('Loaded!','success');setTimeout(function(){location.reload()},1000);
-    }else{showToast('No cloud data','')}
-  }catch(e){showToast('Load err:'+e.message,'error')}
+      _autoSyncPaused=false;
+      if(silent){
+        if(typeof renderDash==='function') renderDash();
+        showToast('已从云端加载数据','success');
+      }else{
+        showToast('云端数据加载成功!','success');
+        // 不再刷新页面，直接更新当前视图
+        setTimeout(function(){ _refreshCurrentView(); }, 500);
+      }
+    }else{if(!silent)showToast('云端暂无数据','')}
+  }catch(e){
+    // 区分网络错误和真正的API错误，优雅降级不弹红框吓人
+    if(e.message.indexOf('Failed to fetch')!==-1||e.message.indexOf('NetworkError')!==-1||e.message.indexOf('Network request failed')!==-1){
+      if(!silent){showToast('无法连接云端，当前使用本地模式','')}
+      console.warn('[WMS Cloud] 网络不可达，已降级为本地模式:',e.message);
+      // 标记离线状态，避免重复尝试
+      window._wmsOffline=true;
+    }else{
+      if(!silent)showToast('加载失败:'+e.message,'error');
+    }
+  }
 }
 
 async function saveSB(dt,d){
@@ -40,54 +70,217 @@ async function saveSB(dt,d){
   else{var r=await client.from('wms_data').insert([{data_type:dt,data:d}]);if(r.error)throw r.error}
 }
 
-async function syncAllToCloud(){
-  try{showToast('Syncing...','');
-    await saveSB('products',JSON.parse(localStorage.getItem('wms_p')||'[]'));
-    await saveSB('inventory',JSON.parse(localStorage.getItem('wms_i')||'[]'));
-    await saveSB('locations',JSON.parse(localStorage.getItem('wms_loc')||'{}'));
-    await saveSB('inbound_records',JSON.parse(localStorage.getItem('wms_in_recs')||'[]'));
-    showToast('Done!','success')}
-  catch(e){showToast('Err:'+e.message,'error')}
+// silent=true时不弹Toast，用于后台自动同步（编辑商品等频繁操作场景）
+async function syncAllToCloud(silent){
+  // 已知离线时跳过，避免无意义报错
+  if(window._wmsOffline) return;
+  // 防止重复同步（上一次还在进行中）
+  if(window._syncing) return;
+  window._syncing=true;
+  try{
+    if(!silent) showToast('同步中...','');
+    // 并行上传4个数据类型（串行4×800ms=3.2s，并行只需~800ms）
+    var results = await Promise.allSettled([
+      saveSB('products',      JSON.parse(localStorage.getItem('wms_p')      ||'[]')),
+      saveSB('inventory',    JSON.parse(localStorage.getItem('wms_i')    ||'[]')),
+      saveSB('locations',     JSON.parse(localStorage.getItem('wms_loc')   ||'{}')),
+      saveSB('inbound_records',JSON.parse(localStorage.getItem('wms_in_recs')||'[]'))
+    ]);
+    // 检查是否有失败
+    var failed = results.filter(function(r){ return r.status==='rejected' });
+    if(failed.length && !window._wmsOffline){
+      // 网络错误时标记离线
+      if(failed.some(function(r){ var m=r.reason&&r.reason.message||''; return m.indexOf('Failed to fetch')!==-1||m.indexOf('NetworkError')!==-1; })){
+        window._wmsOffline=true;
+        if(!silent) showToast('网络不可达，数据已保存在本地','');
+      } else if(!silent) {
+        showToast('部分同步失败:'+failed[0].reason.message,'error');
+      }
+    } else {
+      if(!silent) showToast('云端同步完成!','success');
+    }
+    // 上传成功后更新哈希，避免轮询时重复拉取
+    var now=new Date().toISOString();
+    _lastSyncHash=[
+      'products|'+localStorage.getItem('wms_p')+'|'+now,
+      'inventory|'+localStorage.getItem('wms_i')+'|'+now,
+      'locations|'+localStorage.getItem('wms_loc')+'|'+now,
+      'inbound_records|'+localStorage.getItem('wms_in_recs')+'|'+now
+    ].join(';;');
+  }
+  catch(e){
+    // 网络错误优雅降级
+    if(e.message.indexOf('Failed to fetch')!==-1||e.message.indexOf('NetworkError')!==-1||e.message.indexOf('Network request failed')!==-1){
+      window._wmsOffline=true;
+      if(!silent) showToast('网络不可达，数据已保存在本地','')}
+    else{if(!silent)showToast('同步失败:'+e.message,'error')}
+  }
+  finally{window._syncing=false}
 }
 
 /* ===== AUTO SYNC: 数据变动后自动推送到云端 ===== */
 var _autoSyncTimer=null;
-var _autoSyncDelay=3000; // 3秒防抖
+var _autoSyncDelay=800; // 0.8秒防抖，操作后立即同步
 
 function triggerAutoSync(){
   clearTimeout(_autoSyncTimer);
   _autoSyncTimer=setTimeout(function(){
-    syncAllToCloud();
+    syncAllToCloud(true); // 自动同步用静默模式，不弹Toast
   },_autoSyncDelay);
 }
 
+// 网络恢复时自动清除离线标记并同步
+window.addEventListener('online',function(){
+  if(window._wmsOffline){
+    window._wmsOffline=false;
+    showToast('网络已恢复，正在同步...','');
+    syncAllToCloud();
+  }
+});
+
+var _autoSyncPaused = false;
 // 监听 localStorage 变化（wms_* 开头的关键字）
 var _origSetItem=localStorage.setItem;
 localStorage.setItem=function(k,v){
   _origSetItem.apply(this,arguments);
-  if(k&&k.startsWith('wms_')) triggerAutoSync();
+  if(!_autoSyncPaused && k&&k.startsWith('wms_')) triggerAutoSync();
 };
 
-// 页面关闭前强制同步一次
-window.addEventListener('beforeunload',function(){
-  if(_autoSyncTimer) syncAllToCloud();
+// 页面关闭/隐藏前强制同步
+window.addEventListener('beforeunload', function() {
+  if (_autoSyncTimer) { clearTimeout(_autoSyncTimer); _autoSyncTimer = null; }
+  _syncNowFetch();
 });
 
+window.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') {
+    if (_autoSyncTimer) { clearTimeout(_autoSyncTimer); _autoSyncTimer = null; }
+    syncAllToCloud(true); // 后台同步用静默模式
+  } else {
+    // 切回页面时，从云端拉取最新数据（其他标签/设备可能已修改）
+    _pullLatestFromCloud();
+  }
+});
+
+/* ===== 跨标签页 / 跨设备实时同步 ===== */
+var _lastSyncHash = ''; // 记录上次云端数据的哈希，避免无变化时重复渲染
+var _pollTimer = null;
+
+// 从云端拉取最新数据并对比，有变化则更新本地+刷新UI（静默）
+var _pullingCloud=false; // 防止重复拉取
+function _pullLatestFromCloud(){
+  var client=sb();
+  if(!client||window._wmsOffline||_pullingCloud) return;
+  _pullingCloud=true;
+  client.from('wms_data').select('*').then(function(r){
+    _pullingCloud=false;
+    if(r.error||!r.data||!r.data.length) return;
+    // 生成数据哈希用于对比
+    var hash=r.data.map(function(row){return row.data_type+'|'+JSON.stringify(row.data)+'|'+row.updated_at;}).join(';;');
+    if(hash===_lastSyncHash&&_lastSyncHash) return; // 无变化则跳过
+    _lastSyncHash=hash;
+    // 有变化，静默写入本地并刷新UI
+    _autoSyncPaused=true;
+    for(var i=0;i<r.data.length;i++){
+      var row=r.data[i];
+      if(row.data_type==='products')_origSetItem.call(localStorage,'wms_p',JSON.stringify(row.data));
+      else if(row.data_type==='inventory')_origSetItem.call(localStorage,'wms_i',JSON.stringify(row.data));
+      else if(row.data_type==='locations')_origSetItem.call(localStorage,'wms_loc',JSON.stringify(row.data));
+      else if(row.data_type==='inbound_records')_origSetItem.call(localStorage,'wms_in_recs',JSON.stringify(row.data));
+    }
+    _autoSyncPaused=false;
+    // 刷新当前显示的页面
+    _refreshCurrentView();
+  }).catch(function(){_pullingCloud=false});
+}
+
+// 刷新当前视图（根据活跃tab重新渲染）
+function _refreshCurrentView(){
+  var activeTab=document.querySelector('.nav-btn.active'); // 修正：实际class是nav-btn不是nav-item
+  var page='';
+  if(activeTab){ var onclickStr=activeTab.getAttribute('onclick')||''; var m=onclickStr.match(/go\('(\w+)'\)/); if(m) page=m[1]; }
+  try{
+    if(page==='dashboard'){if(typeof renderDash==='function') renderDash()}
+    else if(page==='in'){if(typeof showInbound==='function') showInbound()}
+    else if(page==='out'){if(typeof showOutbound==='function') showOutbound()}
+    else if(page==='query'){if(typeof doQuery==='function') doQuery()}
+    else if(page==='products'){if(typeof renderProductTable==='function') renderProductTable()}
+    else if(page==='locations'){if(typeof renderLocationTable==='function') renderLocationTable()}
+    else if(page==='stock'){if(typeof renderStock==='function') renderStock()}
+    else if(page==='in-records'){if(typeof renderInRecords==='function') renderInRecords()}
+  }catch(e){}
+}
+
+// 监听同源其他标签页的 localStorage 变化
+window.addEventListener('storage', function(e){
+  if(e.key&&e.key.startsWith('wms_')){
+    // 同源标签页数据变了，立即刷新UI
+    _refreshCurrentView();
+  }
+});
+
+// 定时轮询云端（每30秒检查一次），实现跨设备同步
+function _startCloudPolling(){
+  if(_pollTimer) clearInterval(_pollTimer);
+  _pollTimer=setInterval(function(){
+    if(document.visibilityState==='visible'){
+      _pullLatestFromCloud();
+    }
+  },30000); // 30秒
+}
+
+// 原生 fetch+keepalive 紧急同步（beforeunload 用，不依赖异步完成）
+function _syncNowFetch() {
+  var types = ['products','inventory','locations','inbound_records'];
+  var keys  = ['wms_p','wms_i','wms_loc','wms_in_recs'];
+  var defaults = ['[]','[]','{}','[]'];
+  types.forEach(function(dt, i) {
+    var raw = localStorage.getItem(keys[i]);
+    if (!raw) raw = defaults[i];
+    try {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length === 0) return;
+      if (typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0) return;
+      fetch(SB_URL + '/rest/v1/wms_data?data_type=eq.' + encodeURIComponent(dt), {
+        method: 'DELETE',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY },
+        keepalive: true
+      }).catch(function(){});
+      fetch(SB_URL + '/rest/v1/wms_data', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify([{ data_type: dt, data: parsed, updated_at: new Date().toISOString() }]),
+        keepalive: true
+      }).catch(function(){});
+    } catch(e) {}
+  });
+}
+
 /* 新设备自动从云端拉取数据 */
-document.addEventListener('DOMContentLoaded',function(){
-  // 等待 Supabase JS 加载完成
-  var _sbAttempts=0;
-  var _sbCheck=setInterval(function(){
-    _sbAttempts++;
-    if(window.supabase&&window.supabase.createClient){
-      clearInterval(_sbCheck);
-      var p=localStorage.getItem('wms_p');
-      if(!p||!JSON.parse(p||'[]').length){
-        showToast('正在从云端获取数据...','');
-        loadFromSupabase();
-      }
-    }else if(_sbAttempts>40){clearInterval(_sbCheck)}
-  },500);
+document.addEventListener('DOMContentLoaded', function() {
+  function tryInit() {
+    if (window.supabase && window.supabase.createClient) { _initAutoLoad(); return true; }
+    return false;
+  }
+  if (!tryInit()) {
+    var _sbAttempts = 0;
+    var _sbCheck = setInterval(function() {
+      _sbAttempts++;
+      if (tryInit()) { clearInterval(_sbCheck); }
+      else if (_sbAttempts > 120) { clearInterval(_sbCheck); }
+    }, 500);
+  }
+  function _initAutoLoad() {
+    var p = localStorage.getItem('wms_p');
+    if (!p || !JSON.parse(p || '[]').length) {
+      showToast('正在从云端获取数据...', '');
+      loadFromSupabase(true);
+    }
+    // 启动云端轮询（跨设备/标签页同步）
+    _startCloudPolling();
+    // 首次拉取云端数据哈希（用于后续对比变化）
+    setTimeout(function(){ _pullLatestFromCloud(); }, 2000);
+  }
 });
 </script>
 
@@ -232,8 +425,10 @@ tr:active { background: #f0f4ff; }
 <body>
 
 
-<div class="header" style="display:flex;align-items:center;justify-content:center;" >
-  📦 仓库库存管理
+<div class="header" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;" >
+  <button onclick="go('settings')" style="background:none;border:none;color:white;font-size:20px;cursor:pointer;padding:4px 8px;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.2)'" onmouseout="this.style.background='none'" title="设置">⚙️</button>
+  <span>📦 仓库库存管理</span>
+  <span style="width:40px;"></span>
 </div>
 
 <div class="nav-wrap">
@@ -403,17 +598,22 @@ tr:active { background: #f0f4ff; }
   <div class="card">
     <div class="card-title">📍 货位目录</div>
     <div class="tip">💡 在表格直接录入，或导入Excel。重复库位编码会自动跳过并提示。</div>
-    <div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">
+    <div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <button class="btn btn-success btn-sm" onclick="addLocationRow()">+ 新增行</button>
       <button class="btn btn-primary btn-sm" onclick="saveLocationTable()">💾 保存</button>
       <button class="btn btn-warning btn-sm" onclick="document.getElementById('import-locations-file').click()">📥 导入Excel</button>
       <input type="file" id="import-locations-file" accept=".xlsx,.xls,.csv" style="display:none" onchange="importLocations(event)">
       <button class="btn btn-sm" style="background:#eee;" onclick="exportLocationsExcel()">📤 导出Excel</button>
       <button class="btn btn-sm" style="background:#fff8e1;color:#f57c00;border:1px solid #ffb74d;" onclick="openGenModal()">📦 批量生成库位</button>
+      <button class="btn btn-sm" style="background:#ffebee;color:#c62828;border:1px solid #ef9a9a;" onclick="batchDeleteLocations()">🗑️ 批量删除</button>
+      <span style="font-size:13px;color:#666;margin-left:8px;">排序：</span>
+      <button class="btn btn-sm" style="background:#eee;" onclick="sortLocations('code')">按编码</button>
+      <button class="btn btn-sm" style="background:#eee;" onclick="sortLocations('area')">按区域</button>
+      <span id="loc-sort-ind" style="font-size:13px;color:#1a73e8;"></span>
     </div>
     <div class="table-scroll" style="max-height:50vh;overflow-y:auto;">
       <table id="location-table">
-        <thead><tr><th style="width:40px;">#</th><th>库位编码 *</th><th>库位名称</th><th>区域</th><th style="width:60px;">操作</th></tr></thead>
+        <thead><tr><th style="width:36px;"><input type="checkbox" onchange="toggleAllLocCheck(this)" title="全选/取消"></th><th style="width:40px;">#</th><th>库位编码 *</th><th>区域</th><th style="width:60px;">操作</th></tr></thead>
         <tbody id="location-tbody"></tbody>
       </table>
     </div>
@@ -447,6 +647,14 @@ tr:active { background: #f0f4ff; }
     <div class="card-title">📋 入库管理</div>
     <div class="tip">💡 每次确认入库会生成单据，点击单据号可查看明细。</div>
     <div id="in-records-list"></div>
+  </div>
+</div>
+
+<!-- 设置页面 -->
+<div id="page-settings" class="page">
+  <div class="card">
+    <div class="card-title">⚙️ 系统设置</div>
+    <div id="settings-content"></div>
   </div>
 </div>
 
@@ -525,17 +733,6 @@ window.onerror = function(msg, url, line, col, err){
 };
 let scanTargetId = null;
 
-// ===== 提示消息 =====
-function showToast(msg, type){
-  type = type || 'success';
-  var el = document.getElementById('toast');
-  if(!el) return;
-  el.textContent = msg;
-  el.className = 'toast ' + type;
-  el.style.display = 'block';
-  setTimeout(function(){ el.style.display = 'none'; }, 3000);
-}
-
 
 
 // ===== 数据 =====
@@ -572,17 +769,32 @@ function addLog(type,sku,loc,qty){
 
 // ===== 页面切换 =====
 function go(page){
+  try {
+  // 切页面时，延迟到浏览器空闲再拉云端数据，不阻塞UI
+  if(window.requestIdleCallback){
+    requestIdleCallback(function(){ _pullLatestFromCloud(); }, { timeout: 2000 });
+  } else {
+    setTimeout(function(){ _pullLatestFromCloud(); }, 100);
+  }
   document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
   document.querySelectorAll('.nav-btn').forEach(function(b){ b.classList.remove('active'); });
   var target = document.getElementById('page-'+page);
   if(target) target.classList.add('active');
-  if(event && event.currentTarget) event.currentTarget.classList.add('active');
+  // 根据 page 参数找到对应按钮并设为 active（兼容所有浏览器，不依赖 event 对象）
+  var btns = document.querySelectorAll('.nav-btn');
+  for(var i=0;i<btns.length;i++){
+    if(btns[i].getAttribute('onclick') && btns[i].getAttribute('onclick').indexOf("'"+page+"'")!==-1){
+      btns[i].classList.add('active'); break;
+    }
+  }
   if(page==='dashboard') renderDash();
   if(page==='products') renderProductTable();
   if(page==='locations') renderLocationTable();
   if(page==='stock') renderStock();
   if(page==='in-records') renderInRecords();
   if(page==='query') setTimeout(function(){ doQuery(); }, 100);
+  if(page==='settings') renderSettings();
+  } catch(e) { console.error('go() error:', e); }
 }
 
 // ===== 入库清单相关 =====
@@ -703,6 +915,82 @@ function doInBatch(){
 
 function getInRecords(){
   try { var d = localStorage.getItem(KIR); var r = d?JSON.parse(d):[]; return Array.isArray(r)?r:[]; } catch(e){ return []; }
+}
+
+// ===== 设置页面 =====
+function renderSettings(){
+  // 双重验证：内存变量（快）+ sessionStorage（跨刷新）
+  var verified = window._settingsVerified || (sessionStorage.getItem('_settings_verified')==='yes');
+  if(!verified){
+    var p=prompt('请输入管理密码：');
+    if(p!=='Zw190806'){if(p!==null)alert('密码错误');go('dashboard');return;}
+    window._settingsVerified = true;
+    sessionStorage.setItem('_settings_verified','yes');
+  }
+  var html='';
+  // 云端同步
+  html+='<div style="margin-bottom:24px;">'
+    +'<div style="font-size:15px;font-weight:600;color:#1a73e8;margin-bottom:12px;">☁️ 云端同步</div>'
+    +'<div style="display:flex;gap:10px;flex-wrap:wrap;">'
+    +'<button class="btn btn-primary" onclick="syncAllToCloud()">⬆️ 上传到云端</button>'
+    +'<button class="btn" style="background:#2196F3;color:#fff;" onclick="loadFromSupabase()">⬇️ 从云端下载</button>'
+    +'</div>'
+    +'</div>';
+  // 清空数据
+  var dataItems = [
+    {key:'wms_p',       label:'商品管理',     desc:'商品信息（条码、名称、规格等）'},
+    {key:'wms_i',       label:'货位管理',     desc:'各库位的库存数量'},
+    {key:'wms_loc',     label:'货位目录',     desc:'货位目录（库位编码、区域）'},
+    {key:'wms_in_recs', label:'入库管理',     desc:'入库单据历史记录'},
+    {key:'wms_l',       label:'操作记录',     desc:'首页最近操作记录'},
+  ];
+  html+='<div style="margin-bottom:24px;">'
+    +'<div style="font-size:15px;font-weight:600;color:#f57c00;margin-bottom:12px;">🗑️ 清空数据</div>'
+    +'<div style="color:#888;font-size:13px;margin-bottom:14px;">勾选需要清空的数据类型，点击「清空选中」；或一键清空所有数据。</div>'
+    +'<div style="margin-bottom:14px;">';
+  dataItems.forEach(function(item){
+    var raw=localStorage.getItem(item.key);
+    var hasData = raw && JSON.parse(raw||'[]').length>0;
+    html+='<label style="display:flex;align-items:center;padding:10px 12px;margin-bottom:6px;background:'+(hasData?'#fff8e1':'#f5f5f5')+';border-radius:8px;cursor:pointer;border:1px solid #eee;">'
+      +'<input type="checkbox" class="settings-clear-cb" value="'+item.key+'" style="margin-right:10px;width:16px;height:16px;">'
+      +'<div style="flex:1;">'
+      +'<div style="font-size:14px;font-weight:500;">'+item.label+' <span style="color:#999;font-size:12px;">('+(hasData?'有数据':'空')+')</span></div>'
+      +'<div style="font-size:12px;color:#888;">'+item.desc+'</div>'
+      +'</div>'
+      +'</label>';
+  });
+  html+='</div>'
+    +'<div style="display:flex;gap:10px;flex-wrap:wrap;">'
+    +'<button class="btn btn-warning" onclick="settingsClearSelected()">🗑️ 清空选中</button>'
+    +'<button class="btn" style="background:#f44336;color:#fff;" onclick="settingsClearAll()">💥 一键清空全部</button>'
+    +'</div>'
+    +'</div>';
+  // 退出设置
+  html+='<div style="margin-top:20px;padding-top:16px;border-top:1px solid #eee;">'
+    +'<button class="btn" style="background:#eee;color:#666;" onclick="window._settingsVerified=false;sessionStorage.removeItem(\'_settings_verified\');go(\'dashboard\')">退出设置</button>'
+    +'</div>';
+  document.getElementById('settings-content').innerHTML=html;
+}
+
+function settingsClearSelected(){
+  var cbs=document.querySelectorAll('.settings-clear-cb:checked');
+  if(!cbs.length){alert('请先勾选要清空的数据类型');return;}
+  var labels={wms_p:'商品管理',wms_i:'货位管理',wms_loc:'货位目录',wms_in_recs:'入库管理',wms_l:'操作记录'};
+  var names=Array.from(cbs).map(function(cb){return labels[cb.value]||cb.value}).join('、');
+  if(!confirm('确定要清空以下数据吗？\n'+names+'\n\n此操作不可恢复！'))return;
+  cbs.forEach(function(cb){localStorage.removeItem(cb.value);});
+  alert('已清空选中数据');
+  renderSettings();
+  // 刷新首页统计
+  if(typeof renderDash==='function') renderDash();
+}
+
+function settingsClearAll(){
+  if(!confirm('确定要清空所有数据吗？\n包括：商品管理、货位目录、货位管理、入库管理、操作记录\n\n此操作不可恢复！'))return;
+  if(!confirm('再次确认：清空所有数据？'))return;
+  ['wms_p','wms_i','wms_loc','wms_in_recs','wms_l'].forEach(function(k){localStorage.removeItem(k)});
+  showToast('所有数据已清空','success');
+  renderSettings();
 }
 
 // ===== 入库管理页面 =====
@@ -1175,6 +1463,18 @@ function sortProducts(key){
   renderProductTable();
 }
 
+function sortStock(key){
+  if(_stockSortKey===key){ _stockSortDir=_stockSortDir==='asc'?'desc':'asc'; }
+  else { _stockSortKey=key; _stockSortDir='asc'; }
+  renderStock();
+}
+
+function sortLocations(key){
+  if(_locSortKey===key){ _locSortDir=_locSortDir==='asc'?'desc':'asc'; }
+  else { _locSortKey=key; _locSortDir='asc'; }
+  renderLocationTable();
+}
+
 function escH(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function addProductRow(){ var list=ps(); list.push({sku:'',name:'',loc:''}); savePs(list); renderProductTable(); var lastIdx=list.length-1; setTimeout(function(){ var td=document.getElementById('prod-sku-'+lastIdx); if(td) td.click(); },100); }
@@ -1266,24 +1566,117 @@ function exportInventoryExcel(){
 // ===== 货位目录 =====
 function renderLocationTable(){
   var list=locs();
+  // 排序
+  if(_locSortKey){
+    list.sort(function(a,b){
+      var va=String(a[_locSortKey]||'').toLowerCase();
+      var vb=String(b[_locSortKey]||'').toLowerCase();
+      var ea=!va, eb=!vb;
+      if(ea&&eb) return 0;
+      if(ea) return 1;
+      if(eb) return -1;
+      if(va<vb) return _locSortDir==='asc'?-1:1;
+      if(va>vb) return _locSortDir==='asc'?1:-1;
+      return 0;
+    });
+  }
   var tb=document.getElementById('location-tbody');
-  if(!list.length){ tb.innerHTML='<tr><td colspan="5" class="empty">暂无货位点"新增行"添加</td></tr>'; return; }
+  if(!list.length){ tb.innerHTML='<tr><td colspan="5" class="empty">暂无货位点"新增行"添加</td></tr>'; updateLocSortInd(); return; }
   var html='';
   list.forEach(function(l,i){
     html+='<tr>'
+      +'<td><input type="checkbox" class="loc-check" data-index="'+i+'" onchange="onLocCheckChange()"></td>'
       +'<td>'+(i+1)+'</td>'
       +'<td><input type="text" value="'+escH(l.code)+'" onchange="upL('+i+',\'code\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
-      +'<td><input type="text" value="'+escH(l.name||'')+'" onchange="upL('+i+',\'name\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
       +'<td><input type="text" value="'+escH(l.area||'')+'" onchange="upL('+i+',\'area\',this.value)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:4px;"></td>'
       +'<td><button class="btn btn-danger btn-sm" onclick="delL('+i+')">删除</button></td>'
       +'</tr>';
   });
   tb.innerHTML=html;
+  updateLocSortInd();
+}
+
+function updateLocSortInd(){
+  var ind=document.getElementById('loc-sort-ind');
+  if(!ind) return;
+  if(_locSortKey) ind.textContent='当前按：'+({code:'编码',name:'名称',area:'区域'})[_locSortKey]+' '+(_locSortDir==='asc'?'↑升序':'↓降序');
+  else ind.textContent='';
+}
+
+function toggleAllLocCheck(el){
+  var checks=document.querySelectorAll('.loc-check');
+  checks.forEach(function(c){ c.checked=el.checked; });
+  onLocCheckChange();
+}
+
+function onLocCheckChange(){
+  var checked=document.querySelectorAll('.loc-check:checked').length;
+  var btn=document.querySelector('[onclick="batchDeleteLocations()"]');
+  if(btn){
+    btn.textContent=checked>0?'🗑️ 批量删除('+checked+')':'🗑️ 批量删除';
+  }
+  // 同步全选框状态
+  var all=document.querySelector('#location-table thead input[type=checkbox]');
+  if(all){
+    var total=document.querySelectorAll('.loc-check').length;
+    all.checked=(checked>0 && checked===total);
+    all.indeterminate=(checked>0 && checked<total);
+  }
+}
+
+function batchDeleteLocations(){
+  var checks=document.querySelectorAll('.loc-check:checked');
+  if(!checks.length){ showToast('请先勾选要删除的库位','error'); return; }
+  var indexes=[];
+  checks.forEach(function(c){ indexes.push(Number(c.getAttribute('data-index'))); });
+  // 检查是否有占用的库位
+  var list=locs();
+  var invList=iv();
+  var blocked=[];
+  var deletable=[];
+  indexes.forEach(function(i){
+    var loc=list[i];
+    if(!loc) return;
+    var occupied=invList.filter(function(inv){ return inv.location===loc.code; });
+    if(occupied.length>0){
+      blocked.push(loc.code+'（占用'+occupied.length+'件）');
+    }else{
+      deletable.push(i);
+    }
+  });
+  if(blocked.length>0){
+    showToast('以下库位有货物占用，无法删除：'+blocked.join('、'),'error');
+  }
+  if(deletable.length===0){ return; }
+  if(!confirm('确认删除 '+deletable.length+' 个库位？')) return;
+  // 从大到小删除，避免索引偏移
+  deletable.sort(function(a,b){return b-a;});
+  deletable.forEach(function(i){ list.splice(i,1); });
+  saveLocs(list);
+  renderLocationTable();
+  showToast('已删除 '+deletable.length+' 个库位','success');
 }
 
 function addLocationRow(){ var list=locs(); list.push({code:'',name:'',area:''}); saveLocs(list); renderLocationTable(); }
 function upL(i,f,v){ var list=locs(); if(list[i]){ list[i][f]=v.trim(); saveLocs(list); } }
-function delL(i){ var list=locs(); list.splice(i,1); saveLocs(list); renderLocationTable(); }
+function delL(i){
+  var list=locs();
+  var loc=list[i];
+  if(!loc) return;
+  // 检查该库位是否有货物占用（库存数据字段是 location，不是 loc）
+  var invList=iv();
+  var occupied=invList.filter(function(inv){ return inv.location===loc.code; });
+  if(occupied.length>0){
+    var skuList=occupied.map(function(inv){ return inv.sku; }).filter(function(sku,idx,self){ return self.indexOf(sku)===idx; });
+    showToast('该货位【'+loc.code+'】已占用 '+occupied.length+' 件货品（'+skuList.slice(0,5).join('、')+(skuList.length>5?' 等':'')+'），无法删除！','error');
+    return;
+  }
+  if(!confirm('确认删除库位【'+loc.code+'】？')) return;
+  list.splice(i,1);
+  saveLocs(list);
+  renderLocationTable();
+  showToast('已删除库位【'+loc.code+'】','success');
+}
 
 function saveLocationTable(){
   var list=locs().filter(function(l){ return l.code; });
@@ -1388,6 +1781,7 @@ var _stockColOrder = (localStorage.getItem('wms_stock_col_order')||'sku,name,loc
 var _stockColDefs = { sku:'条码', name:'名称', loc:'库位', qty:'数量' };
 var _prodSortKey = '', _prodSortDir = 'asc';
 var _prodColOrder = (localStorage.getItem('wms_col_order')||'sku,name,loc').split(',');
+var _locSortKey = '', _locSortDir = 'asc';
 
 // 列定义
 var _colDefs = { sku:'商品条码', name:'商品名称', loc:'原始库位' };
@@ -1455,33 +1849,6 @@ showToast('页面已加载完成');
 </script>
 <div id="toast" class="toast"></div>
 <div id="debug-err" style="display:none;position:fixed;bottom:0;left:0;width:100%;max-height:40vh;overflow-y:auto;background:#fff3cd;color:#856404;font-size:12px;padding:8px 10px;border-top:2px solid #ffe58f;z-index:9999;"></div>
-<div id="cloud-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999"><div style="background:#fff;border-radius:12px;padding:20px;width:90%;max-width:400px;margin:auto;position:relative;top:50%;transform:translateY(-50%)"><h3 style="margin-bottom:16px;color:#1a73e8">Cloud Sync</h3><button class="btn" style="width:100%;margin-bottom:8px;background:#4CAF50;color:#fff" onclick="syncAllToCloud()">Upload</button><button class="btn" style="width:100%;margin-bottom:8px;background:#2196F3;color:#fff" onclick="loadFromSupabase()">Download</button><button class="btn" style="width:100%;background:#f44336;color:#fff" onclick="this.closest(&apos;#cloud-modal&apos;).style.display=&apos;none&apos;">Close</button></div></div>
-
-<script>
-(function(){
-  var _c=0, _t=null;
-  function onClickHeader(){
-    _c++; clearTimeout(_t);
-    _t=setTimeout(function(){
-      if(_c>=7){
-        var p=prompt('Password:');
-        if(p!=='Zw190806'){if(p!==null)alert('Wrong');return}
-        if(!confirm('Reset ALL data?'))return;
-        ['wms_p','wms_i','wms_l','wms_loc','wms_in_recs'].forEach(function(k){localStorage.removeItem(k)});
-        alert('Data cleared'); setTimeout(function(){location.reload()},800);
-      } else if(_c>=3){
-        var m=document.getElementById('cloud-modal'); if(m)m.style.display='flex';
-      }
-      _c=0;
-    },3000);
-  }
-  // Attach to header
-  var hdr=document.querySelector('.header');
-  if(hdr){ hdr.style.cursor='pointer'; hdr.addEventListener('click', onClickHeader); }
-  // Also expose globally (for safety)
-  window.onHeaderClick = onClickHeader;
-})();
-</script>
 
 </body>
 </html>
