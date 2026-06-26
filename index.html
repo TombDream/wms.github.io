@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 /* ===== 提示消息（提前定义，供后续代码调用）===== */
 function showToast(msg, type){
@@ -1067,89 +1068,121 @@ function renderDash(){
 
 // ===== 扫码：拍照识别（稳定不崩溃）=====
 var _scanTargetId = '';
+var _html5QrCode = null;
 
 function startScan(targetId){
   _scanTargetId = targetId;
   document.getElementById('scan-modal').classList.add('show');
   document.getElementById('scan-tip').textContent = '正在启动摄像头...';
 
-  var video = document.getElementById('scan-video');
-  var canvas = document.getElementById('scan-canvas');
-  var ctx = canvas.getContext('2d');
-  var scanning = true;
-  var scanTimer = null;
+  // 先清理上一次的实例
+  if(_html5QrCode){
+    try{ _html5QrCode.stop(); }catch(e){}
+    _html5QrCode = null;
+  }
 
-  // 用原生 API 获取摄像头（兼容性最好）
-  navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width: { ideal: 640 },
-      height: { ideal: 480 }
+  var scanRegion = document.getElementById('scan-interactive');
+  scanRegion.innerHTML = '<div id="qr-reader" style="width:100%;height:100%;"></div>';
+  document.getElementById('scan-tip').textContent = '对准条码自动识别';
+
+  _html5QrCode = new Html5Qrcode("qr-reader");
+
+  var config = {
+    fps: 10,
+    qrbox: { width: 250, height: 150 },
+    aspectRatio: 1.3333
+  };
+
+  _html5QrCode.start(
+    { facingMode: "environment" },
+    config,
+    function(decodedText) {
+      // 扫码成功回调
+      var code = decodedText.trim();
+      stopScan();
+
+      var el = document.getElementById(_scanTargetId);
+      if(el){ el.value = code; }
+      if(_scanTargetId==='out-search') onOutSearch();
+      if(_scanTargetId==='q-key') doQuery();
+      if(_scanTargetId==='prod-search') searchProduct();
+      if(_scanTargetId==='stock-search') searchStock();
+      if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
+      if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+    },
+    function(errorMessage) {
+      // 忽略扫描过程中的错误（正常现象）
     }
-  }).then(function(stream) {
-    video.srcObject = stream;
-    video.play();
-    document.getElementById('scan-tip').textContent = '对准条码自动识别';
-
-    // 定时截屏解码（每800ms一次，平衡性能和响应速度）
-    scanTimer = setInterval(function(){
-      if(!scanning) return;
-      if(video.readyState !== video.HAVE_ENOUGH_DATA) return;
-
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0);
-
-      // 用 Quagga 单次解码截图
-      try {
-        Quagga.decodeSingle({
-          decoder: {
-            readers: ['ean_reader','upc_reader','code_128_reader','code_39_reader','itf_reader','codabar_reader']
-          },
-          locate: false,
-          src: canvas.toDataURL('image/png')
-        }, function(result) {
-          if(!scanning) return;
-          if(result && result.codeResult && result.codeResult.code){
-            var code = result.codeResult.code;
-            scanning = false;
-            clearInterval(scanTimer);
-            try{ stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
-            stopScan();
-
-            var el = document.getElementById(_scanTargetId);
-            if(el){ el.value = code; }
-            if(_scanTargetId==='out-search') onOutSearch();
-            if(_scanTargetId==='q-key') doQuery();
-            if(_scanTargetId==='prod-search') searchProduct();
-            if(_scanTargetId==='stock-search') searchStock();
-            if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
-            if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
-          }
-        });
-      } catch(e) {}
-    }, 800);
-
-    window._scanCleanup = function(){
-      scanning = false;
-      if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
-      try{ stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
-    };
-  }).catch(function(err) {
-    console.error('Camera error:', err);
-    document.getElementById('scan-tip').textContent = '无法访问摄像头：'+err.message;
+  ).catch(function(err){
+    console.error('Html5Qrcode error:', err);
+    document.getElementById('scan-tip').textContent = '无法访问摄像头：'+(err||'未知错误');
+    // 降级：显示拍照按钮
+    showPhotoFallback();
   });
 }
 
-function stopScan(){
-  if(window._scanCleanup){ window._scanCleanup(); window._scanCleanup = null; }
-  var video = document.getElementById('scan-video');
-  if(video && video.srcObject){
-    try{ video.srcObject.getTracks().forEach(function(t){ t.stop(); }); }catch(e){}
-    video.srcObject = null;
+// 降级方案：如果实时扫码失败，提供拍照识别
+function showPhotoFallback(){
+  var region = document.getElementById('scan-interactive');
+  region.innerHTML = ''
+    + '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:20px;">'
+    + '  <div style="color:#fff;font-size:15px;text-align:center;">实时扫码不可用<br>请拍照识别条码</div>'
+    + '  <input type="file" id="scan-file-input" accept="image/*" capture="environment" style="display:none" onchange="onScanPhoto(event)">'
+    + '  <button onclick="document.getElementById(\'scan-file-input\').click()" style="background:#fff;color:#1a73e8;font-size:16px;padding:12px 32px;border-radius:28px;border:none;">📷 拍照识别</button>'
+    + '</div>';
+}
+
+function onScanPhoto(event){
+  var file = event.target.files[0];
+  if(!file) return;
+  document.getElementById('scan-tip').textContent = '识别中...';
+
+  if(!_html5QrCode){
+    _html5QrCode = new Html5Qrcode("scan-interactive");
   }
+
+  _html5QrCode.scanFile(file, true)
+    .then(function(code){
+      code = code.trim();
+      stopScan();
+
+      var el = document.getElementById(_scanTargetId);
+      if(el){ el.value = code; }
+      if(_scanTargetId==='out-search') onOutSearch();
+      if(_scanTargetId==='q-key') doQuery();
+      if(_scanTargetId==='prod-search') searchProduct();
+      if(_scanTargetId==='stock-search') searchStock();
+      if(_scanTargetId==='in-sku'){ onInSkuBlur(); setTimeout(function(){ var e=document.getElementById('in-loc'); if(e)e.focus(); }, 300); }
+      if(_scanTargetId==='in-loc') setTimeout(function(){ var e=document.getElementById('in-qty'); if(e)e.focus(); }, 300);
+    })
+    .catch(function(err){
+      showToast('未识别到条码，请重试', 'error');
+      document.getElementById('scan-tip').textContent = '对准条码自动识别';
+      event.target.value = '';
+    });
+}
+
+function stopScan(){
+  if(_html5QrCode){
+    try{
+      _html5QrCode.stop().then(function(){
+        _html5QrCode = null;
+        restoreScanModal();
+      }).catch(function(){});
+      _html5QrCode = null;
+    } catch(e){}
+  }
+  restoreScanModal();
+}
+
+function restoreScanModal(){
   document.getElementById('scan-modal').classList.remove('show');
   document.getElementById('scan-tip').textContent = '';
+  // 恢复 scan-interactive 内部结构
+  var region = document.getElementById('scan-interactive');
+  if(region && !region.querySelector('#qr-reader')){
+    region.innerHTML = '<video id="scan-video" style="width:100%;height:100%;object-fit:cover;"></video><canvas id="scan-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>';
+  }
 }
 
 // ===== 入库 =====
