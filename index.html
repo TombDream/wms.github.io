@@ -73,6 +73,17 @@ function startScan(targetId) {
   tip.textContent = '对准条码自动识别...';
 }
 
+
+// 重置离线/卡死状态并强制重试同步
+function resetOfflineAndRetry() {
+  window._wmsOffline = false;
+  window._syncing = false;
+  window._syncStartTime = 0;
+  console.log('[同步] 已重置离线/卡死状态，开始重试...');
+  showToast('正在重新连接云端...', '');
+  syncAllToCloud();
+}
+
 // 拍照降级方案（摄像头实时不可用时）
 function showPhotoFallback() {
   var region = document.getElementById('scan-interactive');
@@ -207,35 +218,43 @@ async function saveSB(dt,d){
 
 // silent=true时不弹Toast，用于后台自动同步（编辑商品等频繁操作场景）
 async function syncAllToCloud(silent){
-  // 已知离线时跳过，避免无意义报错
-  if(window._wmsOffline) return;
-  // 防止重复同步（上一次还在进行中）
-  if(window._syncing) return;
-  window._syncing=true;
+  // 自动同步时（silent=true）且已知离线，跳过
+  // 手动点击上传时不跳过，强制尝试重连
+  if(window._wmsOffline && silent) { console.log('[同步] 离线状态，跳过自动同步'); return; }
+  if(window._syncing) { console.log('[同步] 正在同步中，跳过重复请求'); return; }
+  window._syncing = true;
+  window._syncStartTime = Date.now();
   try{
     if(!silent) showToast('同步中...','');
-    // 并行上传4个数据类型（串行4×800ms=3.2s，并行只需~800ms）
+    console.log('[同步] 开始上传...');
     var results = await Promise.allSettled([
       saveSB('products',      JSON.parse(localStorage.getItem('wms_p')      ||'[]')),
       saveSB('inventory',    JSON.parse(localStorage.getItem('wms_i')    ||'[]')),
       saveSB('locations',     JSON.parse(localStorage.getItem('wms_loc')   ||'{}')),
       saveSB('inbound_records',JSON.parse(localStorage.getItem('wms_in_recs')||'[]'))
     ]);
-    // 检查是否有失败
+    console.log('[同步] 完成，结果:', results.map(function(r){return r.status;}));
     var failed = results.filter(function(r){ return r.status==='rejected' });
     if(failed.length && !window._wmsOffline){
-      // 网络错误时标记离线
-      if(failed.some(function(r){ var m=r.reason&&r.reason.message||''; return m.indexOf('Failed to fetch')!==-1||m.indexOf('NetworkError')!==-1; })){
+      var errMsg = failed[0].reason&&failed[0].reason.message||'';
+      if(errMsg.indexOf('Failed to fetch')!==-1||errMsg.indexOf('NetworkError')!==-1||errMsg.indexOf('timeout')!==-1){
         window._wmsOffline=true;
+        console.warn('[同步] 网络不可达，进入离线模式');
+        var el=document.getElementById('sync-status');
+        if(el){el.className='sync-status offine';el.textContent='⚠ 离线';}
         if(!silent) showToast('网络不可达，数据已保存在本地','');
       } else if(!silent) {
-        showToast('部分同步失败:'+failed[0].reason.message,'error');
+        showToast('部分同步失败:'+errMsg,'error');
       }
     } else {
+      window._wmsOffline = false;
+      var el=document.getElementById('sync-status');
+      if(el){el.className='sync-status done';el.textContent='✓ 已同步';setTimeout(function(){el.className='sync-status';el.textContent='';},2000);}
       if(!silent) showToast('云端同步完成!','success');
     }
-    // 上传成功后更新哈希，避免轮询时重复拉取
+    // 更新哈希
     var now=new Date().toISOString();
+    try{localStorage.setItem('_wms_last_sync', new Date().toLocaleString('zh-CN'));}catch(e){}
     _lastSyncHash=[
       'products|'+localStorage.getItem('wms_p')+'|'+now,
       'inventory|'+localStorage.getItem('wms_i')+'|'+now,
@@ -244,30 +263,47 @@ async function syncAllToCloud(silent){
     ].join(';;');
   }
   catch(e){
-    // 网络错误优雅降级
-    if(e.message.indexOf('Failed to fetch')!==-1||e.message.indexOf('NetworkError')!==-1||e.message.indexOf('Network request failed')!==-1){
+    console.error('[同步] 异常:', e.message);
+    var msg = e.message||'';
+    if(msg.indexOf('Failed to fetch')!==-1||msg.indexOf('NetworkError')!==-1||msg.indexOf('Network request failed')!==-1){
       window._wmsOffline=true;
+      var el=document.getElementById('sync-status');
+      if(el){el.className='sync-status offine';el.textContent='⚠ 离线';}
       if(!silent) showToast('网络不可达，数据已保存在本地','')}
     else{if(!silent)showToast('同步失败:'+e.message,'error')}
   }
-  finally{window._syncing=false}
+  finally{window._syncing=false; window._syncStartTime=0;}
 }
 
 /* ===== AUTO SYNC: 数据变动后自动推送到云端 ===== */
 var _autoSyncTimer=null;
 var _autoSyncDelay=800; // 0.8秒防抖，操作后立即同步
+var _syncStartTime = 0; // 记录同步开始时间，防止卡死
 
 function triggerAutoSync(){
   clearTimeout(_autoSyncTimer);
   _autoSyncTimer=setTimeout(function(){
-    syncAllToCloud(true); // 自动同步用静默模式，不弹Toast
+    // 显示"同步中"状态
+    var el=document.getElementById('sync-status');
+    if(el){el.className='sync-status syncing';el.textContent='↻ 同步中...';}
+    syncAllToCloud(true);
   },_autoSyncDelay);
 }
 
+// 安全保护：如果同步卡住超过 30 秒，强制重置 _syncing 标志
+setInterval(function(){
+  if(window._syncing && _syncStartTime && Date.now() - _syncStartTime > 30000){
+    console.warn('[同步] 检测到同步卡住，强制重置 _syncing 标志');
+    window._syncing = false;
+    _syncStartTime = 0;
+  }
+}, 5000);
+
 // 网络恢复时自动清除离线标记并同步
 window.addEventListener('online',function(){
-  if(window._wmsOffline){
+  if(window._wmsOffline || window._syncing){
     window._wmsOffline=false;
+    window._syncing=false;
     showToast('网络已恢复，正在同步...','');
     syncAllToCloud();
   }
@@ -532,6 +568,12 @@ tr:active { background: #f0f4ff; }
 .toast.show { display: block; }
 .toast.success { background: #4caf50; }
 .toast.error { background: #f44336; }
+
+/* 同步状态指示器 */
+.sync-status { position: fixed; top: 8px; right: 12px; z-index: 99998; font-size: 12px; padding: 4px 10px; border-radius: 12px; background: rgba(0,0,0,0.55); color: #fff; display: none; pointer-events: none; transition: opacity 0.3s; }
+.sync-status.syncing { display: block; background: rgba(26,115,232,0.85); }
+.sync-status.done { display: block; background: rgba(76,175,80,0.85); }
+.sync-status.offline { display: block; background: rgba(244,67,54,0.85); }
 
 /* ===== 手机适配 (<=600px) ===== */
 @media (max-width: 600px) {
@@ -1066,12 +1108,24 @@ function renderSettings(){
     sessionStorage.setItem('_settings_verified','yes');
   }
   var html='';
+  // 同步状态显示
+  var isOffline = !!window._wmsOffline;
+  var isSyncing = !!window._syncing;
+  var statusColor = isOffline ? '#f44336' : (isSyncing ? '#ff9800' : '#4caf50');
+  var statusText = isOffline ? '⚠️ 离线模式（网络不可达）' : (isSyncing ? '🕐 同步中...' : '✅ 云端连接正常');
+  var lastSync = localStorage.getItem('_wms_last_sync') || '暂无记录';
+
   // 云端同步
   html+='<div style="margin-bottom:24px;">'
     +'<div style="font-size:15px;font-weight:600;color:#1a73e8;margin-bottom:12px;">☁️ 云端同步</div>'
+    +'<div style="background:'+statusColor+'15;border:1px solid '+statusColor+'40;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px;color:'+statusColor+';">'
+    +'  '+statusText+'<br>'
+    +'  <span style="color:#888;font-size:12px;">上次同步：'+lastSync+'</span>'
+    +'</div>'
     +'<div style="display:flex;gap:10px;flex-wrap:wrap;">'
     +'<button class="btn btn-primary" onclick="syncAllToCloud()">⬆️ 上传到云端</button>'
     +'<button class="btn" style="background:#2196F3;color:#fff;" onclick="loadFromSupabase()">⬇️ 从云端下载</button>'
+    +'<button class="btn" style="background:#888;color:#fff;font-size:13px;" onclick="resetOfflineAndRetry()">🔄 重置离线状态</button>'
     +'</div>'
     +'</div>';
   // 清空数据
